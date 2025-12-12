@@ -23,7 +23,7 @@ let audioContext, mediaStreamSource, processorNode;
 let capturing = false;
 
 // Adaptive silence detection config
-const SILENCE_THRESHOLD_MS = 10000; // 10 seconds of silence = end of answer
+const SILENCE_THRESHOLD_MS = 5000; // 5 seconds of silence = end of answer
 const MIN_SPEECH_BEFORE_SILENCE = 500; // At least 500ms of speech before we consider silence
 const VOICE_DETECTION_THRESHOLD = 0.02; // Audio amplitude threshold for voice detection
 
