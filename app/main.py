@@ -73,6 +73,7 @@ async def interview(ws: WebSocket):
         await ws.send_json({"type": "question_text", "text": combined, "expected_length": "short"})
         async for chunk in stream_eleven(combined):
             await ws.send_bytes(chunk)
+        await ws.send_json({"type": "audio_complete"})
 
         # Main turn loop
         while True:
@@ -83,6 +84,7 @@ async def interview(ws: WebSocket):
                 await ws.send_json({"type": "question_text", "text": current_question, "expected_length": "short"})
                 async for chunk in stream_eleven(current_question):
                     await ws.send_bytes(chunk)
+                await ws.send_json({"type": "audio_complete"})
                 try:
                     msg = await asyncio.wait_for(ws.receive_json(), timeout=15)
                 except asyncio.TimeoutError:
@@ -133,6 +135,7 @@ async def interview(ws: WebSocket):
             await ws.send_json({"type": "question_text", "text": current_question, "expected_length": llm_result.expected_response_length})
             async for chunk in stream_eleven(current_question):
                 await ws.send_bytes(chunk)
+            await ws.send_json({"type": "audio_complete"})
 
     except WebSocketDisconnect:
         return
