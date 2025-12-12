@@ -28,6 +28,7 @@ let turnBuffer = [];
 let turnBufferStart = null;
 let firstSpeechDetected = false;
 let expectedResponseLength = "medium";
+let audioEndHandlerSet = false;
 
 function logTranscript(text) {
   const div = document.createElement("div");
@@ -77,6 +78,17 @@ async function startInterview() {
       audioChunks.push(chunk);
       const blob = new Blob(audioChunks, { type: "audio/mpeg" });
       audioPlayer.src = URL.createObjectURL(blob);
+      
+      if (!audioEndHandlerSet) {
+        audioEndHandlerSet = true;
+        audioPlayer.onended = () => {
+          setTimeout(() => {
+            startAudioProcessing();
+            audioEndHandlerSet = false;
+          }, 500);
+        };
+      }
+      
       audioPlayer.play().catch(() => {});
     }
   };
@@ -98,17 +110,12 @@ function handleJson(msg) {
       questionStatus.textContent = "Listening...";
       audioChunks = [];
       expectedResponseLength = msg.expected_length || "medium";
-      
-      audioPlayer.onended = () => {
-        setTimeout(() => {
-          startAudioProcessing();
-        }, 500);
-      };
+      audioEndHandlerSet = false;
       break;
     case "turn_result":
       logTranscript(`You: ${msg.transcript}`);
       logScore(
-        `Score: ${msg.score} | Rationale: ${msg.rationale} | Flags: ${msg.red_flags?.join(", ") || "None"}`
+        `Score: ${msg.score} | Rationale: ${msg.rationale} | Flags: ${msg.red_flags?.join(", ") || "None"}` 
       );
       if (msg.end_interview) {
         questionStatus.textContent = "Interview complete";
