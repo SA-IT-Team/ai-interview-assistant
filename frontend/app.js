@@ -21,14 +21,18 @@ let audioChunks = [];
 let resumeContext = null;
 let audioContext, mediaStreamSource, processorNode;
 let capturing = false;
-let vadSilenceMs = 2000;
-let vadMinVoiceMs = 800;
-let vadMaxTurnMs = 45000;
+
+// Adaptive silence detection config
+const SILENCE_THRESHOLD_MS = 10000; // 10 seconds of silence = end of answer
+const MIN_SPEECH_BEFORE_SILENCE = 500; // At least 500ms of speech before we consider silence
+const VOICE_DETECTION_THRESHOLD = 0.02; // Audio amplitude threshold for voice detection
+
 let lastVoiceTime = 0;
 let turnBuffer = [];
 let turnBufferStart = null;
-let firstSpeechDetected = false;
-let expectedResponseLength = "medium";
+let hasSpoken = false; // Track if candidate has started speaking
+let totalVoicedTime = 0; // Track total time candidate has spoken
+let silenceTimer = null; // Timer for silence detection UI feedback
 let audioStreamComplete = false;
 
 function logTranscript(text) {
@@ -99,7 +103,6 @@ function handleJson(msg) {
       questionEl.textContent = msg.text;
       questionStatus.textContent = "Listening...";
       audioChunks = [];
-      expectedResponseLength = msg.expected_length || "medium";
       audioStreamComplete = false;
       audioPlayer.onended = null;
       stopAudioProcessing();
@@ -166,92 +169,80 @@ function handleAudio(event) {
   const input = event.inputBuffer.getChannelData(0);
   const now = performance.now();
   
+  // Detect if there's voice activity based on amplitude
   let voiced = false;
+  let maxAmplitude = 0;
   for (let i = 0; i < input.length; i++) {
-    if (Math.abs(input[i]) > 0.04) {
+    const amplitude = Math.abs(input[i]);
+    if (amplitude > maxAmplitude) maxAmplitude = amplitude;
+    if (amplitude > VOICE_DETECTION_THRESHOLD) {
       voiced = true;
-      break;
     }
   }
   
-  if (voiced) {
-    lastVoiceTime = now;
-    if (!firstSpeechDetected) {
-      firstSpeechDetected = true;
-      turnBufferStart = now;
-    }
-  }
-  
+  // Always add audio to buffer while capturing
   turnBuffer.push(new Float32Array(input));
-
-  const elapsed = now - (turnBufferStart || now);
-  const silenceElapsed = now - lastVoiceTime;
-
+  
   if (!turnBufferStart) {
     turnBufferStart = now;
   }
-
-  const voicedDuration = elapsed - silenceElapsed;
-  let dynamicSilenceMs = vadSilenceMs;
-  let dynamicMaxTurnMs = vadMaxTurnMs;
-
-  if (expectedResponseLength === "short") {
-    if (voicedDuration < 1000) {
-      dynamicSilenceMs = 1200;
-      dynamicMaxTurnMs = 10000;
-    } else if (voicedDuration < 3000) {
-      dynamicSilenceMs = 1500;
-      dynamicMaxTurnMs = 15000;
-    } else {
-      dynamicSilenceMs = 2000;
-      dynamicMaxTurnMs = 20000;
-    }
-  } else if (expectedResponseLength === "long") {
-    if (voicedDuration < 5000) {
-      dynamicSilenceMs = 2500;
-      dynamicMaxTurnMs = 30000;
-    } else {
-      dynamicSilenceMs = 3000;
-      dynamicMaxTurnMs = 45000;
-    }
-  } else {
-    if (voicedDuration < 2000) {
-      dynamicSilenceMs = 1500;
-      dynamicMaxTurnMs = 15000;
-    } else if (voicedDuration < 5000) {
-      dynamicSilenceMs = 2000;
-      dynamicMaxTurnMs = 25000;
-    } else {
-      dynamicSilenceMs = 2500;
-      dynamicMaxTurnMs = 35000;
-    }
-  }
-
-  if (lastVoiceTime === 0) {
+  
+  if (voiced) {
+    // Candidate is speaking
     lastVoiceTime = now;
+    if (!hasSpoken) {
+      hasSpoken = true;
+      statusText.textContent = "Recording... (speak your answer)";
+    }
+    totalVoicedTime += (input.length / 16000) * 1000; // Add duration of this buffer
+    
+    // Update UI to show active speech
+    statusText.textContent = `Recording... (${Math.floor(totalVoicedTime / 1000)}s spoken)`;
   }
   
-  if (firstSpeechDetected && ((silenceElapsed > dynamicSilenceMs && elapsed > vadMinVoiceMs) || elapsed > dynamicMaxTurnMs)) {
-    finalizeTurn();
-    turnBuffer = [];
-    turnBufferStart = null;
-    lastVoiceTime = 0;
-    firstSpeechDetected = false;
+  // Calculate how long since last voice activity
+  const silenceDuration = now - lastVoiceTime;
+  
+  // Only check for silence timeout if candidate has spoken enough
+  if (hasSpoken && totalVoicedTime >= MIN_SPEECH_BEFORE_SILENCE) {
+    if (silenceDuration > 0 && silenceDuration < SILENCE_THRESHOLD_MS) {
+      // Show countdown in status
+      const remainingSilence = Math.ceil((SILENCE_THRESHOLD_MS - silenceDuration) / 1000);
+      statusText.textContent = `Recording... (${remainingSilence}s silence remaining)`;
+    }
+    
+    // If silence exceeds threshold, finalize the answer
+    if (silenceDuration >= SILENCE_THRESHOLD_MS) {
+      console.log(`Adaptive silence detection: ${silenceDuration}ms silence after ${totalVoicedTime}ms of speech. Finalizing turn.`);
+      finalizeTurn();
+      resetTurnState();
+    }
+  }
+}
+
+function resetTurnState() {
+  turnBuffer = [];
+  turnBufferStart = null;
+  lastVoiceTime = 0;
+  hasSpoken = false;
+  totalVoicedTime = 0;
+  if (silenceTimer) {
+    clearTimeout(silenceTimer);
+    silenceTimer = null;
   }
 }
 
 function startAudioProcessing() {
   capturing = true;
-  turnBuffer = [];
-  turnBufferStart = null;
-  lastVoiceTime = 0;
-  firstSpeechDetected = false;
-  statusText.textContent = "Recording...";
+  resetTurnState();
+  lastVoiceTime = performance.now(); // Initialize to current time
+  statusText.textContent = "Recording... (waiting for you to speak)";
   speakIndicator.classList.remove("hidden");
 }
 
 function stopAudioProcessing() {
   capturing = false;
+  resetTurnState();
   statusText.textContent = "Idle";
   speakIndicator.classList.add("hidden");
 }
