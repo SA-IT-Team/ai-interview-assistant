@@ -101,16 +101,18 @@ function handleJson(msg) {
       audioChunks = [];
       expectedResponseLength = msg.expected_length || "medium";
       audioStreamComplete = false;
+      audioPlayer.onended = null;
       stopAudioProcessing();
       break;
     case "audio_complete":
       audioStreamComplete = true;
       audioPlayer.onended = () => {
+        audioPlayer.onended = null;
         setTimeout(() => {
           startAudioProcessing();
         }, 500);
       };
-      if (audioPlayer.ended || audioPlayer.paused) {
+      if (audioPlayer.ended) {
         setTimeout(() => {
           startAudioProcessing();
         }, 500);
