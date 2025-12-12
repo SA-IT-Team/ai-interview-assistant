@@ -78,7 +78,7 @@ async def interview(ws: WebSocket):
         # Main turn loop
         while True:
             try:
-                msg = await asyncio.wait_for(ws.receive_json(), timeout=15)
+                msg = await asyncio.wait_for(ws.receive_json(), timeout=60)
             except asyncio.TimeoutError:
                 # No response — repeat once then end
                 await ws.send_json({"type": "question_text", "text": current_question, "expected_length": "short"})
@@ -86,7 +86,7 @@ async def interview(ws: WebSocket):
                     await ws.send_bytes(chunk)
                 await ws.send_json({"type": "audio_complete"})
                 try:
-                    msg = await asyncio.wait_for(ws.receive_json(), timeout=15)
+                    msg = await asyncio.wait_for(ws.receive_json(), timeout=60)
                 except asyncio.TimeoutError:
                     await ws.send_json({"type": "done", "message": "No response detected. Ending the interview."})
                     await ws.close()

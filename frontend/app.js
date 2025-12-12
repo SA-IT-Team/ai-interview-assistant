@@ -21,9 +21,9 @@ let audioChunks = [];
 let resumeContext = null;
 let audioContext, mediaStreamSource, processorNode;
 let capturing = false;
-let vadSilenceMs = 1200;
-let vadMinVoiceMs = 600;
-let vadMaxTurnMs = 12000;
+let vadSilenceMs = 2000;
+let vadMinVoiceMs = 800;
+let vadMaxTurnMs = 45000;
 let lastVoiceTime = 0;
 let turnBuffer = [];
 let turnBufferStart = null;
@@ -197,33 +197,33 @@ function handleAudio(event) {
 
   if (expectedResponseLength === "short") {
     if (voicedDuration < 1000) {
-      dynamicSilenceMs = 800;
-      dynamicMaxTurnMs = 5000;
-    } else if (voicedDuration < 3000) {
-      dynamicSilenceMs = 1000;
-      dynamicMaxTurnMs = 8000;
-    } else {
       dynamicSilenceMs = 1200;
       dynamicMaxTurnMs = 10000;
-    }
-  } else if (expectedResponseLength === "long") {
-    if (voicedDuration < 5000) {
+    } else if (voicedDuration < 3000) {
       dynamicSilenceMs = 1500;
       dynamicMaxTurnMs = 15000;
     } else {
       dynamicSilenceMs = 2000;
-      dynamicMaxTurnMs = 25000;
+      dynamicMaxTurnMs = 20000;
+    }
+  } else if (expectedResponseLength === "long") {
+    if (voicedDuration < 5000) {
+      dynamicSilenceMs = 2500;
+      dynamicMaxTurnMs = 30000;
+    } else {
+      dynamicSilenceMs = 3000;
+      dynamicMaxTurnMs = 45000;
     }
   } else {
-    if (voicedDuration < 1000) {
-      dynamicSilenceMs = 800;
-      dynamicMaxTurnMs = 8000;
-    } else if (voicedDuration < 2000) {
-      dynamicSilenceMs = 1000;
-      dynamicMaxTurnMs = 10000;
-    } else if (voicedDuration > 6000) {
+    if (voicedDuration < 2000) {
       dynamicSilenceMs = 1500;
-      dynamicMaxTurnMs = 18000;
+      dynamicMaxTurnMs = 15000;
+    } else if (voicedDuration < 5000) {
+      dynamicSilenceMs = 2000;
+      dynamicMaxTurnMs = 25000;
+    } else {
+      dynamicSilenceMs = 2500;
+      dynamicMaxTurnMs = 35000;
     }
   }
 
