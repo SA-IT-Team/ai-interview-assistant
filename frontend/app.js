@@ -13,6 +13,7 @@ const resumeInput = document.getElementById("resume-file");
 const uploadBtn = document.getElementById("upload-btn");
 const summaryEl = document.getElementById("summary");
 const jsonEl = document.getElementById("json-output");
+const speakIndicator = document.getElementById("speak-indicator");
 
 let ws = null;
 let mediaRecorder = null;
@@ -115,7 +116,7 @@ function handleJson(msg) {
     case "turn_result":
       logTranscript(`You: ${msg.transcript}`);
       logScore(
-        `Score: ${msg.score} | Rationale: ${msg.rationale} | Flags: ${msg.red_flags?.join(", ") || "None"}` 
+        `Score: ${msg.score} | Rationale: ${msg.rationale} | Flags: ${msg.red_flags?.join(", ") || "None"}`
       );
       if (msg.end_interview) {
         questionStatus.textContent = "Interview complete";
@@ -241,11 +242,13 @@ function startAudioProcessing() {
   lastVoiceTime = 0;
   firstSpeechDetected = false;
   statusText.textContent = "Recording...";
+  speakIndicator.classList.remove("hidden");
 }
 
 function stopAudioProcessing() {
   capturing = false;
   statusText.textContent = "Idle";
+  speakIndicator.classList.add("hidden");
 }
 
 function float32ToWavBase64(buffers, sampleRate = 16000) {
@@ -289,6 +292,7 @@ function finalizeTurn() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (!turnBuffer || turnBuffer.length === 0) return;
   statusText.textContent = "Processing answer...";
+  speakIndicator.classList.add("hidden");
   const base64Audio = float32ToWavBase64(turnBuffer, 16000);
   ws.send(
     JSON.stringify({
