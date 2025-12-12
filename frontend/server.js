@@ -9,7 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const port = process.env.PORT || 5173;
+const port = process.env.PORT || 5174;
 const wsUrl = process.env.WS_URL || "ws://localhost:8000/ws/interview";
 const apiUrl = process.env.API_URL || "http://localhost:8000";
 
@@ -30,6 +30,3 @@ app.listen(port, () => {
   console.log(`Frontend server running at http://localhost:${port}`);
   console.log(`Backend WS URL set to ${wsUrl}`);
 });
-
-
-
