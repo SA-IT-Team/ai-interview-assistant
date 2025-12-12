@@ -17,7 +17,7 @@ SYSTEM_PROMPT = (
     "\"evaluation\": {\"communication\": 1-5, \"technical\": 1-5, \"problem_solving\": 1-5, "
     "\"culture_fit\": 1-5, \"recommendation\": \"move_forward|hold|reject\"}}. "
     "Always respond ONLY in JSON with keys: "
-    "next_question, answer_score (1-5), rationale, red_flags (list of short strings), "
+    "next_question, expected_response_length (\"short\" for yes/no/consent questions, \"medium\" for introductions/brief explanations, \"long\" for technical/behavioral questions), answer_score (1-5), rationale, red_flags (list of short strings), "
     "end_interview (bool), final_summary (optional string), final_json (optional object). "
     "Stop after the interviewer signals end_interview or after the 6th question."
 )
@@ -69,6 +69,7 @@ async def call_llm(
         parsed = {}
     parsed = {
         "next_question": parsed.get("next_question") or "Please share more about your recent work.",
+        "expected_response_length": parsed.get("expected_response_length") or "medium",
         "answer_score": parsed.get("answer_score") or 3,
         "rationale": parsed.get("rationale") or "Not provided",
         "red_flags": parsed.get("red_flags") or [],
@@ -77,6 +78,3 @@ async def call_llm(
         "final_json": parsed.get("final_json"),
     }
     return LlmResult(**parsed)
-
-
-

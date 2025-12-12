@@ -70,7 +70,7 @@ async def interview(ws: WebSocket):
         current_question = start_payload.initial_question or consent_q
 
         combined = f"{welcome} {current_question}"
-        await ws.send_json({"type": "question_text", "text": combined})
+        await ws.send_json({"type": "question_text", "text": combined, "expected_length": "short"})
         async for chunk in stream_eleven(combined):
             await ws.send_bytes(chunk)
 
@@ -80,7 +80,7 @@ async def interview(ws: WebSocket):
                 msg = await asyncio.wait_for(ws.receive_json(), timeout=15)
             except asyncio.TimeoutError:
                 # No response — repeat once then end
-                await ws.send_json({"type": "question_text", "text": current_question})
+                await ws.send_json({"type": "question_text", "text": current_question, "expected_length": "short"})
                 async for chunk in stream_eleven(current_question):
                     await ws.send_bytes(chunk)
                 try:
@@ -130,7 +130,7 @@ async def interview(ws: WebSocket):
                 return
 
             current_question = llm_result.next_question
-            await ws.send_json({"type": "question_text", "text": current_question})
+            await ws.send_json({"type": "question_text", "text": current_question, "expected_length": llm_result.expected_response_length})
             async for chunk in stream_eleven(current_question):
                 await ws.send_bytes(chunk)
 
@@ -139,6 +139,3 @@ async def interview(ws: WebSocket):
     except Exception as exc:
         await ws.send_json({"type": "error", "message": str(exc)})
         await asyncio.sleep(0)
-
-
-

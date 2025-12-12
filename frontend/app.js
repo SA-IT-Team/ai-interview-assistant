@@ -20,12 +20,14 @@ let audioChunks = [];
 let resumeContext = null;
 let audioContext, mediaStreamSource, processorNode;
 let capturing = false;
-let vadSilenceMs = 1200; // base silence window
-let vadMinVoiceMs = 600; // min voiced audio to accept a turn
-let vadMaxTurnMs = 12000; // cap a turn (will adjust based on speech)
+let vadSilenceMs = 1200;
+let vadMinVoiceMs = 600;
+let vadMaxTurnMs = 12000;
 let lastVoiceTime = 0;
 let turnBuffer = [];
 let turnBufferStart = null;
+let firstSpeechDetected = false;
+let expectedResponseLength = "medium";
 
 function logTranscript(text) {
   const div = document.createElement("div");
@@ -71,7 +73,6 @@ async function startInterview() {
       const msg = JSON.parse(event.data);
       handleJson(msg);
     } else {
-      // Binary audio chunk; append and update player
       const chunk = new Uint8Array(event.data);
       audioChunks.push(chunk);
       const blob = new Blob(audioChunks, { type: "audio/mpeg" });
@@ -95,8 +96,14 @@ function handleJson(msg) {
     case "question_text":
       questionEl.textContent = msg.text;
       questionStatus.textContent = "Listening...";
-      audioChunks = []; // reset for new playback
-      startAudioProcessing();
+      audioChunks = [];
+      expectedResponseLength = msg.expected_length || "medium";
+      
+      audioPlayer.onended = () => {
+        setTimeout(() => {
+          startAudioProcessing();
+        }, 500);
+      };
       break;
     case "turn_result":
       logTranscript(`You: ${msg.transcript}`);
@@ -145,17 +152,23 @@ function handleAudio(event) {
   if (!capturing) return;
   const input = event.inputBuffer.getChannelData(0);
   const now = performance.now();
-  // Simple energy VAD with adaptive thresholds
+  
   let voiced = false;
   for (let i = 0; i < input.length; i++) {
-    if (Math.abs(input[i]) > 0.02) { // energy threshold
+    if (Math.abs(input[i]) > 0.04) {
       voiced = true;
       break;
     }
   }
+  
   if (voiced) {
     lastVoiceTime = now;
+    if (!firstSpeechDetected) {
+      firstSpeechDetected = true;
+      turnBufferStart = now;
+    }
   }
+  
   turnBuffer.push(new Float32Array(input));
 
   const elapsed = now - (turnBufferStart || now);
@@ -165,28 +178,52 @@ function handleAudio(event) {
     turnBufferStart = now;
   }
 
-  // Adaptive timing based on voiced duration
   const voicedDuration = elapsed - silenceElapsed;
   let dynamicSilenceMs = vadSilenceMs;
   let dynamicMaxTurnMs = vadMaxTurnMs;
 
-  if (voicedDuration < 2000) {
-    dynamicSilenceMs = 600; // still move on fairly fast after short replies
-    dynamicMaxTurnMs = 8000;
-  } else if (voicedDuration > 6000) {
-    dynamicSilenceMs = 1500; // give more room for long answers
-    dynamicMaxTurnMs = 18000; // allow up to ~18s before force-stop
+  if (expectedResponseLength === "short") {
+    if (voicedDuration < 1000) {
+      dynamicSilenceMs = 800;
+      dynamicMaxTurnMs = 5000;
+    } else if (voicedDuration < 3000) {
+      dynamicSilenceMs = 1000;
+      dynamicMaxTurnMs = 8000;
+    } else {
+      dynamicSilenceMs = 1200;
+      dynamicMaxTurnMs = 10000;
+    }
+  } else if (expectedResponseLength === "long") {
+    if (voicedDuration < 5000) {
+      dynamicSilenceMs = 1500;
+      dynamicMaxTurnMs = 15000;
+    } else {
+      dynamicSilenceMs = 2000;
+      dynamicMaxTurnMs = 25000;
+    }
+  } else {
+    if (voicedDuration < 1000) {
+      dynamicSilenceMs = 800;
+      dynamicMaxTurnMs = 8000;
+    } else if (voicedDuration < 2000) {
+      dynamicSilenceMs = 1000;
+      dynamicMaxTurnMs = 10000;
+    } else if (voicedDuration > 6000) {
+      dynamicSilenceMs = 1500;
+      dynamicMaxTurnMs = 18000;
+    }
   }
 
-  // Stop conditions: sustained silence or max turn length
   if (lastVoiceTime === 0) {
     lastVoiceTime = now;
   }
-  if ((silenceElapsed > dynamicSilenceMs && elapsed > vadMinVoiceMs) || elapsed > dynamicMaxTurnMs) {
+  
+  if (firstSpeechDetected && ((silenceElapsed > dynamicSilenceMs && elapsed > vadMinVoiceMs) || elapsed > dynamicMaxTurnMs)) {
     finalizeTurn();
     turnBuffer = [];
     turnBufferStart = null;
     lastVoiceTime = 0;
+    firstSpeechDetected = false;
   }
 }
 
@@ -195,6 +232,7 @@ function startAudioProcessing() {
   turnBuffer = [];
   turnBufferStart = null;
   lastVoiceTime = 0;
+  firstSpeechDetected = false;
   statusText.textContent = "Recording...";
 }
 
@@ -289,4 +327,3 @@ uploadBtn.onclick = async () => {
     uploadBtn.textContent = "Upload Resume";
   }
 };
-

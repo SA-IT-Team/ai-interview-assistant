@@ -26,6 +26,7 @@ class AnswerPayload(BaseModel):
 
 class LlmResult(BaseModel):
     next_question: str
+    expected_response_length: str = "medium"
     answer_score: int
     rationale: str
     red_flags: List[str] = []
@@ -40,6 +41,3 @@ class SessionState(BaseModel):
     candidate_name: Optional[str] = None
     resume_context: Optional[ResumeContext] = None
     history: list = []
-
-
-
