@@ -121,14 +121,16 @@ function handleJson(msg) {
         }, 500);
       }
       break;
-    case "turn_result":
+    case "processing":
+      statusText.textContent = "Generating next question...";
       logTranscript(`You: ${msg.transcript}`);
+      break;
+    case "turn_result":
       logScore(
         `Score: ${msg.score} | Rationale: ${msg.rationale} | Flags: ${msg.red_flags?.join(", ") || "None"}`
       );
       if (msg.end_interview) {
         questionStatus.textContent = "Interview complete";
-        answerBtn.disabled = true;
       }
       break;
     case "done":

@@ -96,10 +96,15 @@ async def interview(ws: WebSocket):
                 continue
 
             payload = AnswerPayload(**msg["data"])
+            
+            # Transcribe audio (this is the first bottleneck)
             transcript = await transcribe_base64_audio(payload.audio_base64, payload.mime_type)
             if not transcript:
                 await ws.send_json({"type": "error", "message": "transcription failed"})
                 continue
+
+            # Immediately notify frontend that we received and transcribed
+            await ws.send_json({"type": "processing", "transcript": transcript})
 
             # Call LLM for scoring + next question
             llm_result: LlmResult = await call_llm(
@@ -111,6 +116,8 @@ async def interview(ws: WebSocket):
             )
 
             state.history.append({"q": current_question, "a": transcript, "score": llm_result.answer_score})
+            
+            # Send turn result immediately so frontend can update UI
             await ws.send_json(
                 {
                     "type": "turn_result",
@@ -132,6 +139,9 @@ async def interview(ws: WebSocket):
                 return
 
             current_question = llm_result.next_question
+            
+            # Send question text immediately, then start streaming audio
+            # This allows frontend to show the question while audio loads
             await ws.send_json({"type": "question_text", "text": current_question, "expected_length": llm_result.expected_response_length})
             async for chunk in stream_eleven(current_question):
                 await ws.send_bytes(chunk)
