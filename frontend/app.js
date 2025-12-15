@@ -342,7 +342,15 @@ function float32ToWavBase64(buffers, sampleRate = 16000) {
   view.setUint32(40, pcm16.length * 2, true);
   const wavBytes = new Uint8Array(buffer);
   wavBytes.set(new Uint8Array(pcm16.buffer), 44);
-  return btoa(String.fromCharCode.apply(null, wavBytes));
+  
+  // Convert to base64 in chunks to avoid stack overflow
+  let binary = '';
+  const chunkSize = 32768;
+  for (let i = 0; i < wavBytes.length; i += chunkSize) {
+    const chunk = wavBytes.subarray(i, Math.min(i + chunkSize, wavBytes.length));
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
 }
 
 function finalizeTurn() {
