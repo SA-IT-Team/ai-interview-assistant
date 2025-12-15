@@ -1,6 +1,7 @@
 import asyncio
 import json
 import random
+import time
 from typing import Optional
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -78,8 +79,11 @@ async def interview(ws: WebSocket):
         # Main turn loop
         while True:
             try:
+                print(f"[WS] Waiting for answer message...")
                 msg = await asyncio.wait_for(ws.receive_json(), timeout=60)
+                print(f"[WS] Received message type: {msg.get('type')}")
             except asyncio.TimeoutError:
+                print(f"[WS] Timeout waiting for answer, repeating question")
                 # No response — repeat once then end
                 await ws.send_json({"type": "question_text", "text": current_question, "expected_length": "short"})
                 async for chunk in stream_eleven(current_question):
@@ -98,13 +102,17 @@ async def interview(ws: WebSocket):
             payload = AnswerPayload(**msg["data"])
             
             # Transcribe audio (this is the first bottleneck)
+            turn_start = time.time()
+            print(f"[WS] Starting transcription...")
             transcript = await transcribe_base64_audio(payload.audio_base64, payload.mime_type)
             if not transcript:
+                print(f"[WS] Transcription returned empty/None")
                 await ws.send_json({"type": "error", "message": "transcription failed"})
                 continue
 
             # Immediately notify frontend that we received and transcribed
             await ws.send_json({"type": "processing", "transcript": transcript})
+            print(f"[WS] Sent processing notification, calling LLM...")
 
             # Call LLM for scoring + next question
             llm_result: LlmResult = await call_llm(
@@ -143,12 +151,18 @@ async def interview(ws: WebSocket):
             # Send question text immediately, then start streaming audio
             # This allows frontend to show the question while audio loads
             await ws.send_json({"type": "question_text", "text": current_question, "expected_length": llm_result.expected_response_length})
+            print(f"[WS] Starting TTS for: '{current_question[:50]}...'")
             async for chunk in stream_eleven(current_question):
                 await ws.send_bytes(chunk)
             await ws.send_json({"type": "audio_complete"})
+            
+            turn_elapsed = time.time() - turn_start
+            print(f"[WS] Turn completed in {turn_elapsed:.2f}s total")
 
     except WebSocketDisconnect:
+        print(f"[WS] Client disconnected")
         return
     except Exception as exc:
+        print(f"[WS] Error: {exc}")
         await ws.send_json({"type": "error", "message": str(exc)})
         await asyncio.sleep(0)

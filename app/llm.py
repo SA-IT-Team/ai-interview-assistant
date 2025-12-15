@@ -1,4 +1,5 @@
 import json
+import time
 from typing import List, Optional
 from openai import AsyncOpenAI
 from .config import get_settings
@@ -36,6 +37,10 @@ async def call_llm(
     """
     settings = get_settings()
     client = AsyncOpenAI(api_key=settings.openai_api_key)
+    
+    print(f"[LLM] Processing transcript: '{transcript[:100]}...' ({len(transcript)} chars)")
+    start_time = time.time()
+    
     # Keep a short, structured conversation context
     history_summary = "\n".join(f"Q: {turn['q']}\nA: {turn['a']}\nScore: {turn.get('score','?')}" for turn in history[-3:])
     resume_text = (
@@ -62,6 +67,10 @@ async def call_llm(
         temperature=0.4,
         response_format={"type": "json_object"},
     )
+    
+    elapsed = time.time() - start_time
+    print(f"[LLM] Response received in {elapsed:.2f}s")
+    
     raw = resp.choices[0].message.content or "{}"
     try:
         parsed = json.loads(raw)
@@ -77,4 +86,7 @@ async def call_llm(
         "final_summary": parsed.get("final_summary"),
         "final_json": parsed.get("final_json"),
     }
+    
+    print(f"[LLM] Next question: '{parsed['next_question'][:50]}...'")
+    
     return LlmResult(**parsed)

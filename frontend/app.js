@@ -23,9 +23,9 @@ let audioContext, mediaStreamSource, processorNode;
 let capturing = false;
 
 // Adaptive silence detection config
-const SILENCE_THRESHOLD_MS = 5000; // 5 seconds of silence = end of answer
-const MIN_SPEECH_BEFORE_SILENCE = 500; // At least 500ms of speech before we consider silence
-const VOICE_DETECTION_THRESHOLD = 0.02; // Audio amplitude threshold for voice detection
+const SILENCE_THRESHOLD_MS = 3000; // 3 seconds of silence = end of answer (reduced for faster response)
+const MIN_SPEECH_BEFORE_SILENCE = 300; // At least 300ms of speech before we consider silence
+const VOICE_DETECTION_THRESHOLD = 0.015; // Audio amplitude threshold for voice detection (lowered for sensitivity)
 
 let lastVoiceTime = 0;
 let turnBuffer = [];
@@ -348,15 +348,27 @@ function float32ToWavBase64(buffers, sampleRate = 16000) {
 function finalizeTurn() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (!turnBuffer || turnBuffer.length === 0) return;
+  
+  console.log("[AudioStateMachine] finalizeTurn() called with", turnBuffer.length, "buffers, totalVoicedTime:", totalVoicedTime);
+  
+  // Stop capturing immediately to prevent multiple finalizeTurn calls
+  capturing = false;
+  
   statusText.textContent = "Processing answer...";
   speakIndicator.classList.add("hidden");
   const base64Audio = float32ToWavBase64(turnBuffer, 16000);
+  
+  console.log("[AudioStateMachine] Sending answer, audio length:", base64Audio.length);
+  
   ws.send(
     JSON.stringify({
       type: "answer",
       data: { audio_base64: base64Audio, mime_type: "audio/wav" },
     })
   );
+  
+  // Reset turn state after sending
+  resetTurnState();
 }
 
 startBtn.onclick = () => {
