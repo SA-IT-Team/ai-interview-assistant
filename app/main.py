@@ -12,7 +12,7 @@ from .llm import call_llm
 from .tts import stream_eleven
 from .resume import extract_text_from_pdf, summarize_resume
 
-app = FastAPI(title="AI Interview Assistant", version="0.1.0")
+app = FastAPI(title="SA Technologies Interview Assistant", version="0.1.0")
 
 
 @app.get("/health")
@@ -56,9 +56,11 @@ async def interview(ws: WebSocket):
             history=[],
         )
         welcomes = [
-            "Hello and welcome to this interview session.",
-            "Hi, thanks for joining the screening today.",
-            "Welcome, and thanks for taking the time to speak with me.",
+            "Hello, I'm Saj from SA Technologies, and welcome to this interview session.",
+            "Hi there, my name is Saj and I'm with SA Technologies. Thank you for joining us today.",
+            "Welcome! I'm Saj, your interviewer from SA Technologies. It's great to have you here.",
+            "Good day! My name is Saj, and I'll be conducting this interview on behalf of SA Technologies.",
+            "Hi, I'm Saj from SA Technologies. Thanks for taking the time to speak with me today.",
         ]
         consents = [
             "Before we begin, is it okay if we start now?",
