@@ -34,6 +34,7 @@ let hasSpoken = false; // Track if candidate has started speaking
 let totalVoicedTime = 0; // Track total time candidate has spoken
 let silenceTimer = null; // Timer for silence detection UI feedback
 let audioStreamComplete = false;
+let audioFallbackTimer = null; // Fallback timer to ensure audio processing starts
 
 function logTranscript(text) {
   const div = document.createElement("div");
@@ -98,27 +99,77 @@ async function startInterview() {
 }
 
 function handleJson(msg) {
+  console.log("[AudioStateMachine] Received message:", msg.type, msg);
+  
   switch (msg.type) {
     case "question_text":
+      console.log("[AudioStateMachine] question_text received, stopping audio processing");
       questionEl.textContent = msg.text;
       questionStatus.textContent = "Listening...";
       audioChunks = [];
       audioStreamComplete = false;
       audioPlayer.onended = null;
+      audioPlayer.onplaying = null;
+      audioPlayer.oncanplaythrough = null;
+      clearAudioFallbackTimer();
       stopAudioProcessing();
       break;
     case "audio_complete":
+      console.log("[AudioStateMachine] audio_complete received, audioPlayer.ended:", audioPlayer.ended, "paused:", audioPlayer.paused);
       audioStreamComplete = true;
+      
+      // Clear any existing fallback timer
+      clearAudioFallbackTimer();
+      
+      // Set up multiple event handlers for reliability
       audioPlayer.onended = () => {
+        console.log("[AudioStateMachine] audioPlayer.onended fired");
         audioPlayer.onended = null;
+        audioPlayer.onplaying = null;
+        clearAudioFallbackTimer();
         setTimeout(() => {
+          console.log("[AudioStateMachine] Starting audio processing after onended");
           startAudioProcessing();
         }, 500);
       };
+      
+      // Use canplaythrough to track when audio is ready
+      audioPlayer.oncanplaythrough = () => {
+        console.log("[AudioStateMachine] audioPlayer.oncanplaythrough fired, duration:", audioPlayer.duration);
+      };
+      
+      // Use playing event to know audio started
+      audioPlayer.onplaying = () => {
+        console.log("[AudioStateMachine] audioPlayer.onplaying fired");
+        // Set fallback timer based on expected duration + buffer
+        const fallbackDelay = Math.max((audioPlayer.duration || 10) * 1000 + 2000, 5000);
+        console.log("[AudioStateMachine] Setting fallback timer for", fallbackDelay, "ms");
+        clearAudioFallbackTimer();
+        audioFallbackTimer = setTimeout(() => {
+          console.log("[AudioStateMachine] Fallback timer fired - forcing startAudioProcessing");
+          if (audioStreamComplete && !capturing) {
+            audioPlayer.onended = null;
+            audioPlayer.onplaying = null;
+            startAudioProcessing();
+          }
+        }, fallbackDelay);
+      };
+      
+      // Check if audio already ended (race condition)
       if (audioPlayer.ended) {
+        console.log("[AudioStateMachine] audioPlayer already ended, starting processing");
         setTimeout(() => {
           startAudioProcessing();
         }, 500);
+      } else if (audioPlayer.paused && audioChunks.length > 0) {
+        // Audio might have failed to play - set a shorter fallback
+        console.log("[AudioStateMachine] Audio paused but chunks exist, setting short fallback");
+        audioFallbackTimer = setTimeout(() => {
+          console.log("[AudioStateMachine] Short fallback timer fired");
+          if (audioStreamComplete && !capturing) {
+            startAudioProcessing();
+          }
+        }, 3000);
       }
       break;
     case "processing":
@@ -135,7 +186,7 @@ function handleJson(msg) {
       break;
     case "done":
       questionStatus.textContent = "Interview complete";
-      stopAudioProcessing();
+      clearAudioFallbackTimer();
       stopAudioProcessing();
       break;
     case "summary":
@@ -149,6 +200,14 @@ function handleJson(msg) {
       break;
     default:
       console.warn("Unknown message", msg);
+  }
+}
+
+function clearAudioFallbackTimer() {
+  if (audioFallbackTimer) {
+    console.log("[AudioStateMachine] Clearing fallback timer");
+    clearTimeout(audioFallbackTimer);
+    audioFallbackTimer = null;
   }
 }
 
