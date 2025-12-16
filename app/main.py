@@ -16,6 +16,35 @@ from .resume import extract_text_from_pdf, summarize_resume
 
 app = FastAPI(title="SA Technologies Interview Assistant", version="0.1.0")
 
+EVALUATIONS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "evaluations")
+os.makedirs(EVALUATIONS_DIR, exist_ok=True)
+
+
+def save_evaluation(state: "SessionState", final_summary: str, final_json: dict):
+    """Save interview evaluation to a JSON file."""
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    safe_name = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in state.candidate_name)
+    safe_name = safe_name.replace(' ', '_')
+    filename = f"{safe_name}_{timestamp}.json"
+    filepath = os.path.join(EVALUATIONS_DIR, filename)
+    
+    evaluation_data = {
+        "candidate_name": state.candidate_name,
+        "role": state.role,
+        "level": state.level,
+        "timestamp": datetime.now().isoformat(),
+        "history": state.history,
+        "evaluation": final_json if final_json else {},
+        "summary": final_summary if final_summary else "",
+        "resume_context": state.resume_context,
+    }
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(evaluation_data, f, indent=2, ensure_ascii=False)
+    
+    print(f"[EVAL] Saved evaluation to: {filepath}")
+    return filepath
+
 
 @app.get("/health")
 async def health():
@@ -146,6 +175,10 @@ async def interview(ws: WebSocket):
                     await ws.send_json({"type": "summary", "text": llm_result.final_summary})
                 if llm_result.final_json:
                     await ws.send_json({"type": "json_report", "data": llm_result.final_json})
+                
+                # Save evaluation to file
+                save_evaluation(state, llm_result.final_summary, llm_result.final_json)
+                
                 await ws.send_json({"type": "done", "message": "Interview complete. Thank you!"})
                 await ws.close()
                 return
