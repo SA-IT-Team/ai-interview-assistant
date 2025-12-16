@@ -2,6 +2,8 @@ import asyncio
 import json
 import random
 import time
+import os
+from datetime import datetime
 from typing import Optional
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -13,6 +15,32 @@ from .tts import stream_eleven
 from .resume import extract_text_from_pdf, summarize_resume
 
 app = FastAPI(title="SA Technologies Interview Assistant", version="0.1.0")
+
+EVALUATIONS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "evaluations")
+os.makedirs(EVALUATIONS_DIR, exist_ok=True)
+
+
+def save_evaluation(candidate_name: str, role: str, level: str, history: list, final_summary: str, final_json: dict):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = "".join(c if c.isalnum() else "_" for c in candidate_name)
+    filename = f"{timestamp}_{safe_name}.json"
+    filepath = os.path.join(EVALUATIONS_DIR, filename)
+    
+    evaluation_data = {
+        "timestamp": datetime.now().isoformat(),
+        "candidate_name": candidate_name,
+        "role": role,
+        "level": level,
+        "interview_history": history,
+        "final_summary": final_summary,
+        "final_evaluation": final_json,
+    }
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(evaluation_data, f, indent=2, ensure_ascii=False)
+    
+    print(f"[Evaluation] Saved to {filepath}")
+    return filepath
 
 
 @app.get("/health")
@@ -140,10 +168,14 @@ async def interview(ws: WebSocket):
             )
 
             if llm_result.end_interview or len(state.history) >= 6:
-                if llm_result.final_summary:
-                    await ws.send_json({"type": "summary", "text": llm_result.final_summary})
-                if llm_result.final_json:
-                    await ws.send_json({"type": "json_report", "data": llm_result.final_json})
+                save_evaluation(
+                    candidate_name=state.candidate_name,
+                    role=state.role,
+                    level=state.level,
+                    history=state.history,
+                    final_summary=llm_result.final_summary or "",
+                    final_json=llm_result.final_json or {},
+                )
                 await ws.send_json({"type": "done", "message": "Interview complete. Thank you!"})
                 await ws.close()
                 return

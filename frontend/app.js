@@ -4,15 +4,14 @@ const apiUrl = (window.__APP_CONFIG__ && window.__APP_CONFIG__.API_URL) || "http
 const startBtn = document.getElementById("start-btn");
 const questionEl = document.getElementById("question-text");
 const transcriptLog = document.getElementById("transcript-log");
-const scoreLog = document.getElementById("score-log");
+
 const connectionStatus = document.getElementById("connection-status");
 const questionStatus = document.getElementById("question-status");
 const audioPlayer = document.getElementById("audio-player");
 const statusText = document.getElementById("status-text");
 const resumeInput = document.getElementById("resume-file");
 const uploadBtn = document.getElementById("upload-btn");
-const summaryEl = document.getElementById("summary");
-const jsonEl = document.getElementById("json-output");
+
 const speakIndicator = document.getElementById("speak-indicator");
 
 let ws = null;
@@ -42,11 +41,7 @@ function logTranscript(text) {
   transcriptLog.prepend(div);
 }
 
-function logScore(text) {
-  const div = document.createElement("div");
-  div.textContent = text;
-  scoreLog.prepend(div);
-}
+
 
 async function startInterview() {
   const role = document.getElementById("role").value || "Backend Engineer";
@@ -177,24 +172,19 @@ function handleJson(msg) {
       logTranscript(`You: ${msg.transcript}`);
       break;
     case "turn_result":
-      logScore(
-        `Score: ${msg.score} | Rationale: ${msg.rationale} | Flags: ${msg.red_flags?.join(", ") || "None"}`
-      );
-      if (msg.end_interview) {
-        questionStatus.textContent = "Interview complete";
-      }
-      break;
+        if (msg.end_interview) {
+          questionStatus.textContent = "Interview complete";
+        }
+        break;
     case "done":
       questionStatus.textContent = "Interview complete";
       clearAudioFallbackTimer();
       stopAudioProcessing();
       break;
     case "summary":
-      summaryEl.textContent = msg.text || "";
-      break;
-    case "json_report":
-      jsonEl.textContent = JSON.stringify(msg.data, null, 2);
-      break;
+        break;
+      case "json_report":
+        break;
     case "error":
       logTranscript(`Error: ${msg.message}`);
       break;
@@ -405,9 +395,8 @@ uploadBtn.onclick = async () => {
       throw new Error(await res.text());
     }
     const data = await res.json();
-    resumeContext = data.resume_context;
-    summaryEl.textContent = resumeContext?.summary || "Resume parsed.";
-    questionStatus.textContent = "Resume loaded. Ready to start.";
+      resumeContext = data.resume_context;
+      questionStatus.textContent = "Resume loaded. Ready to start.";
   } catch (err) {
     alert("Upload failed: " + err);
   } finally {
