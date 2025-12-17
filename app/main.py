@@ -1,205 +1,110 @@
-import asyncio
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 import json
-import random
-import time
 import os
 from datetime import datetime
-from typing import Optional
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
-from .config import get_settings
-from .schemas import AnswerPayload, LlmResult, SessionState, StartPayload
-from .stt import transcribe_base64_audio
-from .llm import call_llm
-from .tts import stream_eleven
-from .resume import extract_text_from_pdf, summarize_resume
 
-app = FastAPI(title="SA Technologies Interview Assistant", version="0.1.0")
+from app.schemas import ChatRequest, TTSRequest, EvaluationRequest
+from app.llm import get_interview_response, generate_evaluation
+from app.tts import text_to_speech
+from app.stt import speech_to_text
+from app.resume import extract_text_from_pdf
 
-EVALUATIONS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "evaluations")
+app = FastAPI(title="AI Interview Assistant")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+EVALUATIONS_DIR = "evaluations"
 os.makedirs(EVALUATIONS_DIR, exist_ok=True)
 
+@app.get("/")
+async def root():
+    return {"message": "AI Interview Assistant API"}
 
-def save_evaluation(state: "SessionState", final_summary: str, final_json: dict):
-    """Save interview evaluation to a JSON file."""
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    safe_name = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in state.candidate_name)
-    safe_name = safe_name.replace(' ', '_')
-    filename = f"{safe_name}_{timestamp}.json"
-    filepath = os.path.join(EVALUATIONS_DIR, filename)
-    
-    evaluation_data = {
-        "candidate_name": state.candidate_name,
-        "role": state.role,
-        "level": state.level,
-        "timestamp": datetime.now().isoformat(),
-        "history": state.history,
-        "evaluation": final_json if final_json else {},
-        "summary": final_summary if final_summary else "",
-        "resume_context": state.resume_context,
-    }
-    
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(evaluation_data, f, indent=2, ensure_ascii=False)
-    
-    print(f"[EVAL] Saved evaluation to: {filepath}")
-    return filepath
+@app.post("/chat")
+async def chat(request: ChatRequest):
+    try:
+        response = get_interview_response(
+            messages=request.conversation_history,
+            job_role=request.job_role,
+            resume_text=request.resume_text
+        )
+        return {"response": response}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/tts")
+async def tts(request: TTSRequest):
+    try:
+        audio_bytes = await text_to_speech(request.text)
+        return Response(content=audio_bytes, media_type="audio/mpeg")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/health")
-async def health():
-    settings = get_settings()
-    return JSONResponse({"status": "ok", "voice_id": settings.eleven_voice_id})
-
+@app.post("/stt")
+async def stt(audio: UploadFile = File(...)):
+    try:
+        text = await speech_to_text(audio.file)
+        return {"text": text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/upload-resume")
 async def upload_resume(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF resumes are supported.")
-    content = await file.read()
-    text = extract_text_from_pdf(content)
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="Could not extract text from PDF.")
-    summary = await summarize_resume(text)
-    return {"resume_context": summary}
-
-
-@app.websocket("/ws/interview")
-async def interview(ws: WebSocket):
-    await ws.accept()
-    settings = get_settings()
-    state: Optional[SessionState] = None
-    current_question: Optional[str] = None
     try:
-        # Expect a start payload first
-        start_msg = await ws.receive_json()
-        if start_msg.get("type") != "start":
-            await ws.send_json({"type": "error", "message": "expected start message"})
-            await ws.close()
-            return
+        content = await file.read()
+        text = extract_text_from_pdf(content)
+        return {"text": text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-        start_payload = StartPayload(**start_msg["data"])
-        state = SessionState(
-            role=start_payload.role,
-            level=start_payload.level,
-            candidate_name=start_payload.candidate_name,
-            resume_context=start_payload.resume_context,
-            history=[],
+@app.post("/evaluate")
+async def evaluate(request: EvaluationRequest):
+    try:
+        evaluation = generate_evaluation(
+            messages=request.conversation_history,
+            job_role=request.job_role
         )
-        welcomes = [
-            "Hello, I'm Saj from SA Technologies, and welcome to this interview session.",
-            "Hi there, my name is Saj and I'm with SA Technologies. Thank you for joining us today.",
-            "Welcome! I'm Saj, your interviewer from SA Technologies. It's great to have you here.",
-            "Good day! My name is Saj, and I'll be conducting this interview on behalf of SA Technologies.",
-            "Hi, I'm Saj from SA Technologies. Thanks for taking the time to speak with me today.",
-        ]
-        consents = [
-            "Before we begin, is it okay if we start now?",
-            "May I have your permission to proceed with the interview?",
-            "Can we go ahead and get started?",
-            "Are you ready for me to begin?",
-        ]
-        welcome = random.choice(welcomes)
-        consent_q = random.choice(consents)
-        current_question = start_payload.initial_question or consent_q
+        
+        eval_data = save_evaluation(evaluation, request.job_role)
+        
+        return {"evaluation": evaluation, "saved": eval_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-        combined = f"{welcome} {current_question}"
-        await ws.send_json({"type": "question_text", "text": combined, "expected_length": "short"})
-        async for chunk in stream_eleven(combined):
-            await ws.send_bytes(chunk)
-        await ws.send_json({"type": "audio_complete"})
+def save_evaluation(evaluation: str, job_role: str) -> dict:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{job_role.replace(' ', '_')}_{timestamp}.json"
+    filepath = os.path.join(EVALUATIONS_DIR, filename)
+    
+    data = {
+        "job_role": job_role,
+        "evaluation": evaluation,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    with open(filepath, 'w') as f:
+        json.dump(data, f, indent=2)
+    
+    return {"filename": filename, "timestamp": data["timestamp"]}
 
-        # Main turn loop
-        while True:
-            try:
-                print(f"[WS] Waiting for answer message...")
-                msg = await asyncio.wait_for(ws.receive_json(), timeout=60)
-                print(f"[WS] Received message type: {msg.get('type')}")
-            except asyncio.TimeoutError:
-                print(f"[WS] Timeout waiting for answer, repeating question")
-                # No response — repeat once then end
-                await ws.send_json({"type": "question_text", "text": current_question, "expected_length": "short"})
-                async for chunk in stream_eleven(current_question):
-                    await ws.send_bytes(chunk)
-                await ws.send_json({"type": "audio_complete"})
-                try:
-                    msg = await asyncio.wait_for(ws.receive_json(), timeout=60)
-                except asyncio.TimeoutError:
-                    await ws.send_json({"type": "done", "message": "No response detected. Ending the interview."})
-                    await ws.close()
-                    return
-            if msg.get("type") != "answer":
-                await ws.send_json({"type": "error", "message": "expected answer message"})
-                continue
-
-            payload = AnswerPayload(**msg["data"])
-            
-            # Transcribe audio (this is the first bottleneck)
-            turn_start = time.time()
-            print(f"[WS] Starting transcription...")
-            transcript = await transcribe_base64_audio(payload.audio_base64, payload.mime_type)
-            if not transcript:
-                print(f"[WS] Transcription returned empty/None")
-                await ws.send_json({"type": "error", "message": "transcription failed"})
-                continue
-
-            # Immediately notify frontend that we received and transcribed
-            await ws.send_json({"type": "processing", "transcript": transcript})
-            print(f"[WS] Sent processing notification, calling LLM...")
-
-            # Call LLM for scoring + next question
-            llm_result: LlmResult = await call_llm(
-                role=state.role,
-                level=state.level,
-                history=state.history,
-                transcript=transcript,
-                resume=state.resume_context,
-            )
-
-            state.history.append({"q": current_question, "a": transcript, "score": llm_result.answer_score})
-            
-            # Send turn result immediately so frontend can update UI
-            await ws.send_json(
-                {
-                    "type": "turn_result",
-                    "transcript": transcript,
-                    "score": llm_result.answer_score,
-                    "rationale": llm_result.rationale,
-                    "red_flags": llm_result.red_flags,
-                    "end_interview": llm_result.end_interview,
-                }
-            )
-
-            if llm_result.end_interview or len(state.history) >= 6:
-                if llm_result.final_summary:
-                    await ws.send_json({"type": "summary", "text": llm_result.final_summary})
-                if llm_result.final_json:
-                    await ws.send_json({"type": "json_report", "data": llm_result.final_json})
-                
-                # Save evaluation to file
-                save_evaluation(state, llm_result.final_summary, llm_result.final_json)
-                
-                await ws.send_json({"type": "done", "message": "Interview complete. Thank you!"})
-                await ws.close()
-                return
-
-            current_question = llm_result.next_question
-            
-            # Send question text immediately, then start streaming audio
-            # This allows frontend to show the question while audio loads
-            await ws.send_json({"type": "question_text", "text": current_question, "expected_length": llm_result.expected_response_length})
-            print(f"[WS] Starting TTS for: '{current_question[:50]}...'")
-            async for chunk in stream_eleven(current_question):
-                await ws.send_bytes(chunk)
-            await ws.send_json({"type": "audio_complete"})
-            
-            turn_elapsed = time.time() - turn_start
-            print(f"[WS] Turn completed in {turn_elapsed:.2f}s total")
-
-    except WebSocketDisconnect:
-        print(f"[WS] Client disconnected")
-        return
-    except Exception as exc:
-        print(f"[WS] Error: {exc}")
-        await ws.send_json({"type": "error", "message": str(exc)})
-        await asyncio.sleep(0)
+@app.get("/evaluations")
+async def list_evaluations():
+    try:
+        files = os.listdir(EVALUATIONS_DIR)
+        evaluations = []
+        for f in files:
+            if f.endswith('.json'):
+                with open(os.path.join(EVALUATIONS_DIR, f)) as file:
+                    data = json.load(file)
+                    evaluations.append({"filename": f, **data})
+        return {"evaluations": evaluations}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
