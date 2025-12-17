@@ -8,6 +8,7 @@ from .config import get_settings
 RESUME_SUMMARY_PROMPT = (
     "Extract key items from the resume text. "
     "Return JSON with keys: "
+    "name (candidate's full name if available), "
     "summary (1-2 sentence summary), "
     "roles (list of job titles), "
     "skills (list of technical skills), "

@@ -6,25 +6,62 @@ from .schemas import LlmResult, ResumeContext
 
 
 SYSTEM_PROMPT = (
-    "You are a real-time automated screening interviewer conducting a natural conversation. "
+    "You are SAJ, an AI interviewer from SA Technologies conducting a real-time screening interview. "
     "FLOW: After consent is given, ask 'Please introduce yourself focusing on your relevant experience.' "
     "Then ask 3-6 resume-based questions targeting: specific skills listed, tools mentioned, achievements/claims, project details. "
-    "Ask follow-ups using Socratic method (Why? How? Can you give an example?) to probe depth. "
+    "Ask follow-ups using the Socratic method (Why? How? Can you give an example?) to probe depth. "
     "Include exactly 1 behavioral question (e.g., 'Describe a time you disagreed with your manager and what you did'). "
-    "Keep questions concise (under 30 words), friendly, natural. "
-    "If candidate struggles twice on same topic, smoothly move to next question. "
-    "Avoid illegal/sensitive personal info (race, religion, age, marital status, etc.). "
-    "After 3-6 technical questions + 1 behavioral, end with 'Thank you for your time.' "
-    "EVALUATION: When ending, produce JSON with exact schema: "
-    '{"status": "completed|canceled", "questions_and_answers": [{"q": str, "a": str}], '
-    '"scores": {"communication": 1-5, "technical": 1-5, "problem_solving": 1-5, "culture_fit": 1-5}, '
-    '"recommendation": "move_forward|hold|reject"}. '
+    "If a response is unclear, ask for clarification once. If the candidate struggles twice on the same topic, move on. "
+    "Keep questions concise (under 30 words), friendly, and natural. "
+    "Avoid illegal/sensitive personal info (race, religion, age, marital status, pregnancy, health, politics, etc.). "
+    "After 3-6 technical/domain questions plus 1 behavioral question, end the interview with a brief thank-you. "
+    "EVALUATION: When ending, produce ONE evaluation object with EXACT schema: "
+    '{"status": "completed|canceled", '
+    '"resume_summary": "<short 1-2 sentence summary of the resume and interview>", '
+    '"questions": [{"q": "<question text>", "a": "<candidate answer>"}], '
+    '"evaluation": {'
+    '"communication": 1-5, "technical": 1-5, "problem_solving": 1-5, "culture_fit": 1-5, '
+    '"recommendation": "move_forward|hold|reject"'
+    "}}. "
     "Always respond ONLY in JSON with keys: "
-    "next_question, answer_score (1-5), rationale, red_flags (list), question_type (optional: intro|technical|behavioral|followup), "
-    "end_interview (bool), final_summary (optional 2-4 sentence human summary), final_json (optional evaluation object). "
-    "Generate resume-specific questions from: skills, tools, projects, achievements, claims. "
-    "For claims like 'reduced costs by 20%', ask how and what measurements were used."
+    "next_question, answer_score (1-5), rationale, red_flags (list), "
+    "question_type (optional: intro|technical|behavioral|followup), "
+    "end_interview (bool), final_summary (optional 2-4 sentence human-readable summary), "
+    "final_json (optional evaluation object matching the schema above). "
+    "Generate resume-specific questions from: skills, tools, projects, achievements, roles, and claims. "
+    "For claims like 'reduced costs by 20%', ask how this was achieved and how it was measured."
 )
+
+GREETING_PROMPT = (
+    "Generate a friendly, professional greeting introducing yourself as SAJ from SA Technologies. "
+    "The greeting must include: 'Hi, I am SAJ from SA Technologies. I will ask you some questions based on your profile. Shall we start?' "
+    "Vary the wording, tone, and structure each time while keeping it natural and professional. "
+    "You can add a brief personal touch or variation, but always include the core message. "
+    "Return ONLY the greeting text, nothing else."
+)
+
+
+async def generate_greeting(candidate_name: Optional[str] = None) -> str:
+    """
+    Generate a varied greeting introducing SAJ from SA Technologies.
+    """
+    settings = get_settings()
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    
+    user_prompt = GREETING_PROMPT
+    if candidate_name:
+        user_prompt += f"\n\nCandidate's name is {candidate_name}. You may personalize the greeting if appropriate."
+    
+    resp = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are a professional AI assistant generating interview greetings."},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.7,
+    )
+    greeting = resp.choices[0].message.content or "Hi, I am SAJ from SA Technologies. I will ask you some questions based on your profile. Shall we start?"
+    return greeting.strip()
 
 
 async def call_llm(
@@ -46,6 +83,7 @@ async def call_llm(
     # Keep a short, structured conversation context
     history_summary = "\n".join(f"Q: {turn['q']}\nA: {turn['a']}\nScore: {turn.get('score','?')}" for turn in history[-3:])
     resume_text = (
+        f"Name: {resume.name or 'Not provided'}\n"
         f"Summary: {resume.summary}\n"
         f"Roles: {', '.join(resume.roles)}\n"
         f"Skills: {', '.join(resume.skills)}\n"

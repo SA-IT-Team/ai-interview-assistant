@@ -4,6 +4,10 @@ from pydantic import BaseModel
 
 
 class ResumeContext(BaseModel):
+    """
+    Parsed resume summary used to drive interview questions.
+    """
+    name: Optional[str] = None
     summary: Optional[str] = None
     roles: List[str] = []
     skills: List[str] = []
@@ -17,6 +21,9 @@ class ResumeContext(BaseModel):
 
 
 class StartPayload(BaseModel):
+    """
+    Initial WebSocket start payload from the frontend.
+    """
     role: str
     level: str
     candidate_name: Optional[str] = None
@@ -25,30 +32,75 @@ class StartPayload(BaseModel):
 
 
 class AnswerPayload(BaseModel):
+    """
+    Audio answer frame from the frontend (base64-encoded audio).
+    """
     audio_base64: str
     mime_type: str = "audio/webm"
 
 
+class QaItem(BaseModel):
+    """
+    Single question/answer pair for the final JSON payload.
+    """
+    q: str
+    a: str
+
+
+class EvaluationScores(BaseModel):
+    """
+    Final evaluation scores for the simplified JSON schema.
+    """
+    communication: int
+    technical: int
+    problem_solving: int
+    culture_fit: int
+    recommendation: str  # "move_forward" | "hold" | "reject"
+
+
+class FinalEvaluation(BaseModel):
+    """
+    Top-level evaluation object returned at the end of the interview.
+    """
+    status: str  # "completed" | "canceled"
+    resume_summary: Optional[str] = None
+    questions: List[QaItem] = []
+    evaluation: EvaluationScores
+
+
 class LlmResult(BaseModel):
+    """
+    Normalised result from the LLM per turn.
+    """
     next_question: str
     answer_score: int
     rationale: str
     red_flags: List[str] = []
     end_interview: bool = False
+    # Optional fields for when the LLM decides to end the interview.
     final_summary: Optional[str] = None
-    final_json: Optional[dict] = None
+    final_json: Optional[dict] = None  # Expected to conform to FinalEvaluation
+    # Flow control metadata
     question_type: Optional[str] = None  # "intro", "technical", "behavioral", "followup"
 
 
 class SessionState(BaseModel):
+    """
+    Server-side state for a single interview session.
+    """
     role: str
     level: str
     candidate_name: Optional[str] = None
     resume_context: Optional[ResumeContext] = None
+    # Turn-level history: list of dicts with keys q, a, score, type
     history: list = []
     question_count: int = 0
     has_asked_intro: bool = False
     has_asked_behavioral: bool = False
+    # Simple counters for clarification / struggle tracking (used by flow logic)
+    clarification_attempts: int = 0
+    struggle_streak: int = 0
+    # Timestamps / flags
     interview_started_at: Optional[str] = None
     consent_given: bool = False
 
