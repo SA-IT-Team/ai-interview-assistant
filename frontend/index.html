@@ -223,6 +223,13 @@
             background: #7c3aed;
         }
 
+        .ready-countdown {
+            margin-left: 10px;
+            color: #00d4ff;
+            font-size: 0.9rem;
+            font-style: italic;
+        }
+
         @keyframes pulse-dot {
             0%, 100% { opacity: 1; transform: scale(1); }
             50% { opacity: 0.5; transform: scale(1.2); }
@@ -366,6 +373,7 @@
                 <div class="conversation-indicator" id="conversationIndicator">
                     <div class="indicator-dot" id="indicatorDot"></div>
                     <span id="conversationStatus">Ready</span>
+                    <span id="ready-countdown" class="ready-countdown" style="display: none;"></span>
                 </div>
             </div>
 

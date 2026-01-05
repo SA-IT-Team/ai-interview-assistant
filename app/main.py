@@ -1,9 +1,12 @@
 import asyncio
 import json
 import logging
+import time
+import uuid
 from datetime import datetime
 from typing import Optional
 import httpx
+from openai import AsyncOpenAI
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -51,6 +54,35 @@ async def options_handler(full_path: str):
 async def health():
     settings = get_settings()
     return JSONResponse({"status": "ok", "voice_id": settings.eleven_voice_id})
+
+
+@app.get("/test-openai")
+async def test_openai():
+    """Test OpenAI API connection and response time."""
+    try:
+        settings = get_settings()
+        client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=10.0)
+        
+        import time
+        start = time.time()
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": "Say 'OK'"}],
+            max_tokens=10,
+        )
+        elapsed = time.time() - start
+        
+        return {
+            "status": "success",
+            "response": resp.choices[0].message.content,
+            "response_time_seconds": round(elapsed, 2)
+        }
+    except Exception as e:
+        logger.error(f"OpenAI test failed: {str(e)}", exc_info=True)
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500
+        )
 
 
 @app.get("/test-tts")
@@ -110,20 +142,51 @@ async def test_tts():
 
 @app.post("/upload-resume")
 async def upload_resume(file: UploadFile = File(...)):
+    request_id = str(uuid.uuid4())[:8]
+    start_time = time.time()
+    
     try:
+        file_size = file.size if hasattr(file, 'size') else None
+        elapsed = time.time() - start_time
+        logger.info(f"[{request_id}] [{elapsed:.2f}s] Received resume upload request: {file.filename}, size: {file_size}")
+        
         if not file.filename or not file.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Only PDF resumes are supported.")
+        
+        elapsed = time.time() - start_time
+        logger.info(f"[{request_id}] [{elapsed:.2f}s] Reading file content...")
         content = await file.read()
+        elapsed = time.time() - start_time
+        logger.info(f"[{request_id}] [{elapsed:.2f}s] File read: {len(content)} bytes")
+        
         if not content:
             raise HTTPException(status_code=400, detail="File is empty.")
-        text = extract_text_from_pdf(content)
+        
+        elapsed = time.time() - start_time
+        logger.info(f"[{request_id}] [{elapsed:.2f}s] Starting PDF text extraction...")
+        text = await extract_text_from_pdf(content, request_id)  # Now async, pass request_id
+        elapsed = time.time() - start_time
+        logger.info(f"[{request_id}] [{elapsed:.2f}s] PDF extraction completed: {len(text)} characters")
+        
         if not text.strip():
             raise HTTPException(status_code=400, detail="Could not extract text from PDF.")
-        summary = await summarize_resume(text)
+        
+        elapsed = time.time() - start_time
+        logger.info(f"[{request_id}] [{elapsed:.2f}s] Starting OpenAI summarization...")
+        summary = await summarize_resume(text, request_id)  # Pass request_id
+        elapsed = time.time() - start_time
+        logger.info(f"[{request_id}] [{elapsed:.2f}s] OpenAI summarization completed")
+        
+        elapsed = time.time() - start_time
+        logger.info(f"[{request_id}] [{elapsed:.2f}s] Resume processing completed successfully")
         return {"resume_context": summary}
     except HTTPException:
+        elapsed = time.time() - start_time
+        logger.error(f"[{request_id}] [{elapsed:.2f}s] HTTPException raised")
         raise
     except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error(f"[{request_id}] [{elapsed:.2f}s] Error processing resume: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing resume: {str(e)}")
 
 
@@ -184,45 +247,59 @@ async def interview(ws: WebSocket):
                 await ws.send_bytes(chunk)
                 chunk_count += 1
             logger.info(f"TTS streaming completed: {chunk_count} chunks sent")
+            # Signal that audio is complete and system is ready to listen
+            await ws.send_json({"type": "ready_to_listen"})
         except TTSException as e:
             logger.error(f"TTS failed for greeting: {str(e)}")
             await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
+            # Even on TTS error, allow text-based interview
+            await ws.send_json({"type": "ready_to_listen"})
 
         # Main turn loop
         while True:
             try:
-                msg = await asyncio.wait_for(ws.receive_json(), timeout=15)
-            except asyncio.TimeoutError:
-                # No response — repeat once then end
-                await ws.send_json({"type": "question_text", "text": current_question})
-                logger.info(f"Repeating question via TTS: {len(current_question)} characters")
-                try:
-                    chunk_count = 0
-                    async for chunk in stream_eleven(current_question):
-                        await ws.send_bytes(chunk)
-                        chunk_count += 1
-                    logger.info(f"TTS streaming completed: {chunk_count} chunks sent")
-                except TTSException as e:
-                    logger.error(f"TTS failed for repeat: {str(e)}")
-                    await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
-                try:
-                    msg = await asyncio.wait_for(ws.receive_json(), timeout=15)
-                except asyncio.TimeoutError:
-                    await ws.send_json({"type": "done", "message": "No response detected. Ending the interview."})
-                    await ws.close()
-                    return
+                logger.info("Waiting for answer from candidate...")
+                # Remove timeout - wait indefinitely for candidate's answer
+                # The frontend VAD will handle when to send the answer based on actual speech
+                msg = await ws.receive_json()
+                logger.info(f"Received message type: {msg.get('type')}")
+            except WebSocketDisconnect:
+                logger.info("WebSocket disconnected by client")
+                return
+            except Exception as e:
+                logger.error(f"Error receiving message: {str(e)}", exc_info=True)
+                await ws.send_json({"type": "error", "message": "Error receiving answer"})
+                continue
+                
             if msg.get("type") != "answer":
                 await ws.send_json({"type": "error", "message": "expected answer message"})
                 continue
 
             payload = AnswerPayload(**msg["data"])
-            transcript = await transcribe_base64_audio(payload.audio_base64, payload.mime_type)
-            if not transcript:
-                await ws.send_json({"type": "error", "message": "transcription failed"})
+            transcript = await transcribe_base64_audio(
+                payload.audio_base64, 
+                payload.mime_type,
+                current_question=current_question
+            )
+            
+            # Stricter validation: reject empty or whitespace-only transcripts
+            if not transcript or not transcript.strip():
+                logger.warning(f"Received empty or invalid transcript, ignoring answer")
+                await ws.send_json({"type": "error", "message": "transcription failed or empty"})
+                # Don't repeat question immediately - wait for next answer attempt
                 continue
+            
+            # Log the actual transcript for debugging - this should always be the real Whisper result
+            logger.info(f"=== TRANSCRIPT RECEIVED ===")
+            logger.info(f"Full transcript: '{transcript}'")
+            logger.info(f"Transcript length: {len(transcript)} characters")
+            logger.info(f"Current question: '{current_question[:100] if current_question else 'None'}...'")
+            logger.info(f"===========================")
 
             # Check for consent cancellation (first answer only)
             if len(state.history) == 0 and not state.consent_given:
+                # Log the actual transcript for debugging
+                logger.info(f"Consent answer received: '{transcript}'")
                 transcript_lower = transcript.lower()
                 cancel_keywords = ["no", "not now", "later", "cancel", "not ready", "wait"]
                 if any(keyword in transcript_lower for keyword in cancel_keywords):
@@ -246,9 +323,40 @@ async def interview(ws: WebSocket):
                     return
                 else:
                     state.consent_given = True
+                    # Send the consent answer transcript to frontend for display
+                    await ws.send_json({
+                        "type": "turn_result",
+                        "transcript": transcript,  # Show what candidate actually said
+                        "score": 0,  # No score for consent
+                        "rationale": "Consent given",
+                        "red_flags": [],
+                        "end_interview": False,
+                    })
+                    
+                    # Don't call LLM for consent answer - proceed directly to intro question
+                    # Set the intro question directly
+                    current_question = "Please introduce yourself in 60 seconds focusing on your most relevant experience for this role."
+                    await ws.send_json({"type": "question_text", "text": current_question})
+                    
+                    # Stream TTS for intro question
+                    logger.info(f"Starting TTS for intro question: {len(current_question)} characters")
+                    try:
+                        chunk_count = 0
+                        async for chunk in stream_eleven(current_question):
+                            await ws.send_bytes(chunk)
+                            chunk_count += 1
+                        logger.info(f"TTS streaming completed: {chunk_count} chunks sent")
+                        await ws.send_json({"type": "ready_to_listen"})
+                    except TTSException as e:
+                        logger.error(f"TTS failed for intro question: {str(e)}")
+                        await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
+                        await ws.send_json({"type": "ready_to_listen"})
+                    
+                    # Continue to next iteration to wait for intro answer
+                    continue
 
-            # Call LLM for scoring + next question
-            logger.info(f"Calling LLM: question_count={state.question_count}, has_asked_intro={state.has_asked_intro}, has_asked_behavioral={state.has_asked_behavioral}")
+            # Call LLM for scoring + next question (only after consent is given)
+            logger.info(f"Calling LLM: question_count={state.question_count}, has_asked_intro={state.has_asked_intro}, has_asked_behavioral={state.has_asked_behavioral}, transcript='{transcript[:50]}...'")
             llm_result: LlmResult = await call_llm(
                 role=state.role,
                 level=state.level,
@@ -281,10 +389,11 @@ async def interview(ws: WebSocket):
                 "type": llm_result.question_type or "technical"
             })
             
+            # Send turn_result with actual transcript from Whisper (never hardcoded)
             await ws.send_json(
                 {
                     "type": "turn_result",
-                    "transcript": transcript,
+                    "transcript": transcript,  # This is always the actual Whisper transcript
                     "score": llm_result.answer_score,
                     "rationale": llm_result.rationale,
                     "red_flags": llm_result.red_flags,
@@ -293,11 +402,32 @@ async def interview(ws: WebSocket):
             )
 
             # Check if interview should end
+            # Dynamic ending based on signal quality and LLM decision
+            # Calculate signal quality metrics
+            if state.history:
+                avg_score = sum(turn.get('score', 3) for turn in state.history) / len(state.history)
+                high_score_count = sum(1 for turn in state.history if turn.get('score', 3) >= 4)
+                low_score_count = sum(1 for turn in state.history if turn.get('score', 3) <= 2)
+                has_strong_signals = avg_score >= 3.5 and high_score_count >= 2 and len(state.history) >= 4
+                has_weak_signals = avg_score <= 2.5 and low_score_count >= 3 and len(state.history) >= 5
+            else:
+                avg_score = 0
+                has_strong_signals = False
+                has_weak_signals = False
+            
+            # Dynamic ending conditions:
+            # 1. LLM decides to end (and we have at least 1 real question)
+            # 2. Strong signals collected (high scores, good coverage) after minimum questions
+            # 3. Weak signals but enough questions asked (candidate struggling, move on)
+            # 4. Maximum safety limit (12 questions) to prevent infinite loops
             should_end = (
-                llm_result.end_interview or 
-                (state.has_asked_intro and state.has_asked_behavioral and state.question_count >= 4) or
-                state.question_count >= 8
+                (llm_result.end_interview and state.question_count >= 1) or
+                (has_strong_signals and state.has_asked_intro and (state.has_asked_behavioral or state.question_count >= 5)) or
+                (has_weak_signals and state.question_count >= 6) or
+                state.question_count >= 12  # Safety maximum (increased from 8)
             )
+            
+            logger.info(f"Interview end check: should_end={should_end}, question_count={state.question_count}, end_interview={llm_result.end_interview}, has_asked_intro={state.has_asked_intro}, has_asked_behavioral={state.has_asked_behavioral}, avg_score={avg_score:.1f}, has_strong_signals={has_strong_signals}")
             
             if should_end:
                 # Generate final evaluation if not provided by LLM
@@ -334,9 +464,13 @@ async def interview(ws: WebSocket):
                     await ws.send_bytes(chunk)
                     chunk_count += 1
                 logger.info(f"TTS streaming completed: {chunk_count} chunks sent")
+                # Signal that audio is complete and system is ready to listen
+                await ws.send_json({"type": "ready_to_listen"})
             except TTSException as e:
                 logger.error(f"TTS failed for question: {str(e)}")
                 await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
+                # Even on TTS error, allow text-based interview
+                await ws.send_json({"type": "ready_to_listen"})
 
     except WebSocketDisconnect:
         return

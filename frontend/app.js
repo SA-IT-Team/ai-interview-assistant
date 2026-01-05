@@ -27,7 +27,7 @@ let audioPlaybackContext = null;
 let capturing = false;
 let vadSilenceMs = 1200;
 let vadMinVoiceMs = 600;
-let vadMaxTurnMs = 12000;
+let vadMaxTurnMs = 30000; // Increased from 12000 to 30000 (30 seconds) for longer answers
 let lastVoiceTime = 0;
 let turnBuffer = [];
 let turnBufferStart = null;
@@ -38,6 +38,10 @@ let interviewStartTime = null;
 let timerInterval = null;
 let questionCount = 0;
 let maxQuestions = 8;
+let isReadyToAnswer = false;
+let countdownInterval = null;
+let pendingReadyToListen = false;
+let isAudioPlaying = false;
 
 // File upload handlers
 fileUploadArea.addEventListener("click", () => resumeFileInput.click());
@@ -79,15 +83,48 @@ async function handleResumeUpload() {
     uploadScreen.classList.add("hidden");
     loadingScreen.classList.add("active");
     uploadError.classList.add("hidden");
+    
+    // Update loading message with progress updates
+    const loadingSubtext = document.querySelector("#loadingScreen .loading-subtext");
+    let progressStep = 0;
+    const progressMessages = [
+        "Uploading file...",
+        "Extracting text from PDF...",
+        "Analyzing with AI...",
+        "Finalizing..."
+    ];
+    
+    // Update progress message every 20 seconds
+    const progressInterval = setInterval(() => {
+        if (progressStep < progressMessages.length - 1) {
+            progressStep++;
+            if (loadingSubtext) {
+                loadingSubtext.textContent = progressMessages[progressStep];
+            }
+        }
+    }, 20000); // Update every 20 seconds
+    
+    // Set initial message
+    if (loadingSubtext) {
+        loadingSubtext.textContent = progressMessages[0];
+    }
 
     const form = new FormData();
     form.append("file", file);
 
     try {
+        // Create AbortController for timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 90000); // 90 second timeout (increased from 60)
+        
         const res = await fetch(`${apiUrl}/upload-resume`, {
             method: "POST",
             body: form,
+            signal: controller.signal,
         });
+
+        clearTimeout(timeoutId);
+        clearInterval(progressInterval); // Clear progress updates on success
 
         if (!res.ok) {
             const errorText = await res.text();
@@ -107,9 +144,20 @@ async function handleResumeUpload() {
             startInterview();
         }, 1000);
     } catch (err) {
-        showError("Upload failed: " + err.message);
+        clearInterval(progressInterval); // Clear progress updates on error
+        
+        if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+            showError("Upload timed out after 90 seconds. The resume may be complex or the API is slow. Please try again or check your connection.");
+        } else {
+            showError("Upload failed: " + err.message);
+        }
         loadingScreen.classList.remove("active");
         uploadScreen.classList.remove("hidden");
+        
+        // Reset loading message
+        if (loadingSubtext) {
+            loadingSubtext.textContent = "Extracting skills, experience, and qualifications";
+        }
     }
 }
 
@@ -265,6 +313,23 @@ async function startInterview() {
             const url = URL.createObjectURL(blob);
             
             updateConversationState("speaking");
+            isAudioPlaying = true; // Track that audio is playing
+            
+            // Helper function to handle audio completion
+            const onAudioComplete = () => {
+                console.log("Audio playback completed");
+                isAudioPlaying = false; // Audio is no longer playing
+                URL.revokeObjectURL(url);
+                audioChunks = [];
+                isReceivingAudio = false;
+                
+                // If ready_to_listen was received while audio was playing, start countdown now
+                if (pendingReadyToListen) {
+                    console.log("Audio finished, starting countdown now");
+                    pendingReadyToListen = false;
+                    startCountdownAndListening();
+                }
+            };
             
             // Try HTML5 audio first (simpler, works if browser supports MPEG)
             const canPlayMpeg = audioPlayer.canPlayType("audio/mpeg");
@@ -289,29 +354,23 @@ async function startInterview() {
                     console.log("Audio loaded via HTML5, playing...");
                     audioPlayer.play().then(() => {
                         console.log("Audio playing successfully via HTML5");
-                        audioPlayer.onended = () => {
-                            console.log("Audio playback ended");
-                            updateConversationState("listening");
-                            URL.revokeObjectURL(url);
-                            audioChunks = [];
-                            isReceivingAudio = false;
-                        };
+                        audioPlayer.onended = onAudioComplete;
                     }).catch((err) => {
                         console.error("HTML5 audio play failed, trying Web Audio API:", err);
-                        playWithWebAudioAPI(blob, url);
+                        playWithWebAudioAPI(blob, url, onAudioComplete);
                     });
                 };
                 
                 audioPlayer.onerror = (e) => {
                     console.error("HTML5 audio error, trying Web Audio API:", e);
-                    playWithWebAudioAPI(blob, url);
+                    playWithWebAudioAPI(blob, url, onAudioComplete);
                 };
                 
                 audioPlayer.load();
             } else {
                 // Browser doesn't support MPEG, use Web Audio API
                 console.log("Browser doesn't support MPEG, using Web Audio API");
-                playWithWebAudioAPI(blob, url);
+                playWithWebAudioAPI(blob, url, onAudioComplete);
             }
             
             if (audioTimeoutId) {
@@ -320,7 +379,7 @@ async function startInterview() {
             }
         }
         
-        async function playWithWebAudioAPI(blob, url) {
+        async function playWithWebAudioAPI(blob, url, onComplete) {
             try {
                 // Create Web Audio API context if needed
                 if (!audioPlaybackContext) {
@@ -346,14 +405,12 @@ async function startInterview() {
                 
                 source.onended = () => {
                     console.log("Web Audio API playback ended");
-                    updateConversationState("listening");
+                    if (onComplete) onComplete();
                     URL.revokeObjectURL(url);
-                    audioChunks = [];
-                    isReceivingAudio = false;
                 };
                 
                 source.start(0);
-                console.log("Audio playing successfully via Web Audio API");
+                console.log("Web Audio API playback started");
             } catch (err) {
                 console.error("Web Audio API playback failed:", err);
                 console.error("Error details:", {
@@ -361,10 +418,11 @@ async function startInterview() {
                     message: err.message,
                     stack: err.stack
                 });
-                updateConversationState("listening");
                 URL.revokeObjectURL(url);
-                audioChunks = [];
-                isReceivingAudio = false;
+                // On error, still signal completion so interview can continue
+                // Reset audio playing state
+                isAudioPlaying = false;
+                if (onComplete) onComplete();
             }
         }
 
@@ -384,39 +442,150 @@ async function startInterview() {
     }
 }
 
+function startCountdownAndListening() {
+    // Remove countdown - start listening immediately
+    // Clear any previous audio data
+    turnBuffer = [];
+    turnBufferStart = null;
+    lastVoiceTime = 0;
+    
+    // Check media before starting
+    if (!analyserNode) {
+        console.error("Cannot start listening: analyserNode is null");
+        showError("Microphone not available. Please refresh and allow microphone access.");
+        return;
+    }
+    
+    // Check if AudioContext needs to be resumed
+    if (audioContext && audioContext.state === 'suspended') {
+        console.log("AudioContext suspended, attempting to resume...");
+        audioContext.resume().then(() => {
+            console.log("AudioContext resumed, starting audio processing");
+            isReadyToAnswer = true;
+            questionText.textContent = "🎤 Your turn! Please speak your answer now...";
+            updateConversationState("listening");
+            startAudioProcessing();
+        }).catch((err) => {
+            console.error("Failed to resume AudioContext:", err);
+            showError("Please click anywhere on the page to activate the microphone.");
+        });
+        return;
+    }
+    
+    isReadyToAnswer = true; // Ready to accept answers immediately
+    
+    // Show clear "Your Turn" message
+    questionText.textContent = "🎤 Your turn! Please speak your answer now...";
+    updateConversationState("listening");
+    
+    startAudioProcessing();
+}
+
 function handleJson(msg) {
+    // Handle resume_summary early to prevent "Unknown message" warning
+    if (msg.type === "resume_summary") {
+        addTranscriptEntry("assistant", msg.text);
+        return;
+    }
+    
     switch (msg.type) {
         case "question_text":
+            // Stop any ongoing audio processing when new question arrives
+            stopAudioProcessing();
+            isReadyToAnswer = false; // Reset flag - wait for ready_to_listen
+            pendingReadyToListen = false; // Reset pending flag
+            isAudioPlaying = false; // Reset audio playing flag
+            // Clear any existing countdown
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
+            // Clear any buffered audio from previous turn
+            turnBuffer = [];
+            turnBufferStart = null;
+            lastVoiceTime = 0;
+            
+            // Update question display
             questionText.textContent = msg.text;
-            addTranscriptEntry("assistant", msg.text);
+            // Only add to transcript if it's different from what's already displayed
+            // Check if the last transcript entry is the same question to avoid duplication
+            const transcriptEntries = document.querySelectorAll('.transcript-entry');
+            const lastEntry = transcriptEntries[transcriptEntries.length - 1];
+            const isDuplicate = lastEntry && 
+                                lastEntry.classList.contains('assistant') && 
+                                lastEntry.textContent.trim() === msg.text.trim();
+            
+            if (!isDuplicate) {
+                addTranscriptEntry("assistant", msg.text);
+            }
+            // Don't start listening yet - wait for ready_to_listen signal
             // Audio will be played when stream completes (handled in onmessage)
-            // Start listening after a delay to allow audio to finish
-            setTimeout(() => {
-                if (audioPlayer.paused || audioPlayer.ended) {
-                    updateConversationState("listening");
-                    startAudioProcessing();
-                } else {
-                    // Wait for audio to finish
-                    audioPlayer.onended = () => {
-                        updateConversationState("listening");
-                        startAudioProcessing();
-                    };
-                }
-            }, 1000);
+            updateConversationState("speaking");
+            break;
+        case "ready_to_listen":
+            // Backend has finished sending audio and is ready for answer
+            console.log("System ready to listen - starting audio capture");
+            
+            // Stop any existing audio processing first
+            stopAudioProcessing();
+            
+            // Clear any existing countdown
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
+            
+            // If audio is still playing, wait for it to finish
+            if (isAudioPlaying) {
+                console.log("Audio still playing, will start listening when audio finishes");
+                pendingReadyToListen = true;
+                // Keep "speaking" state until audio finishes
+                break;
+            }
+            
+            // Audio has finished, start listening immediately
+            // Note: isReadyToAnswer will be set to true in startCountdownAndListening()
+            startCountdownAndListening();
             break;
         case "turn_result":
-            addTranscriptEntry("candidate", msg.transcript);
+            console.log("=== TURN RESULT RECEIVED ===");
+            console.log("Transcript:", msg.transcript);
+            console.log("Score:", msg.score);
+            console.log("Rationale:", msg.rationale);
+            console.log("End interview:", msg.end_interview);
+            console.log("============================");
+            
+            // Always display the actual transcript from backend
+            if (msg.transcript && msg.transcript.trim()) {
+                addTranscriptEntry("candidate", msg.transcript);
+                console.log("Transcript displayed in UI:", msg.transcript);
+            } else {
+                console.warn("Received empty transcript in turn_result!");
+                addTranscriptEntry("candidate", "[No transcript available]");
+            }
+            
+            stopAudioProcessing(); // Stop listening when answer is processed
+            isReadyToAnswer = false; // Reset flag
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
             if (msg.end_interview) {
                 updateConversationState("processing");
-                stopAudioProcessing();
             } else {
                 updateProgress();
+                updateConversationState("processing"); // Show processing while next question is generated
             }
             break;
         case "done":
             updateConversationState("ready");
             stopTimer();
             stopAudioProcessing();
+            isReadyToAnswer = false; // Reset flag
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
             questionText.textContent = "Interview complete. Thank you for your time!";
             break;
         case "summary":
@@ -429,12 +598,17 @@ function handleJson(msg) {
             console.error("TTS Error:", msg.message);
             showError("Audio generation failed: " + msg.message);
             addTranscriptEntry("assistant", `[Audio Error: ${msg.message}]`);
-            updateConversationState("listening");
-            // Continue interview without audio
-            startAudioProcessing();
+            // ready_to_listen will be sent after tts_error, so don't start here
             break;
         case "error":
             showError(msg.message);
+            // Reset state on error
+            stopAudioProcessing();
+            isReadyToAnswer = false;
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
             break;
         default:
             console.warn("Unknown message", msg);
@@ -443,8 +617,20 @@ function handleJson(msg) {
 
 async function setupMedia() {
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        audioContext = new AudioContext({ sampleRate: 16000 });
+        console.log("Requesting microphone access...");
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            audio: {
+                sampleRate: 44100, // Higher sample rate for better quality
+                channelCount: 1,
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true
+            }
+        });
+        console.log("Microphone access granted");
+        
+        // Use higher sample rate for better transcription accuracy
+        audioContext = new AudioContext({ sampleRate: 44100 });
         mediaStreamSource = audioContext.createMediaStreamSource(stream);
         
         analyserNode = audioContext.createAnalyser();
@@ -454,15 +640,37 @@ async function setupMedia() {
         
         const bufferLength = analyserNode.frequencyBinCount;
         audioDataArray = new Float32Array(bufferLength);
+        
+        console.log("Media setup complete:", {
+            hasAudioContext: !!audioContext,
+            hasAnalyserNode: !!analyserNode,
+            hasAudioDataArray: !!audioDataArray,
+            bufferLength: bufferLength,
+            sampleRate: audioContext.sampleRate
+        });
     } catch (e) {
-        showError("Microphone access denied: " + e.message);
+        const errorMsg = "Microphone access denied: " + e.message;
         console.error("Media setup error:", e);
+        showError(errorMsg);
+        // Don't silently fail - show error to user
+        updateConversationState("ready");
     }
 }
 
 function processAudio() {
     if (!capturing || !analyserNode) {
+        if (!capturing) {
+            console.log("processAudio: not capturing, stopping");
+        }
+        if (!analyserNode) {
+            console.error("processAudio: analyserNode is null!");
+        }
         return;
+    }
+    
+    // Log periodically to verify the loop is running
+    if (turnBuffer.length % 200 === 0 && turnBuffer.length > 0) {
+        console.log(`processAudio: running, buffer_size=${turnBuffer.length}, capturing=${capturing}`);
     }
     
     analyserNode.getFloatTimeDomainData(audioDataArray);
@@ -475,14 +683,37 @@ function handleAudioData(audioData) {
     if (!capturing) return;
     const now = performance.now();
     
-    let voiced = false;
+    // Improved voice detection: check for sustained voice, not just peaks
+    let maxAmplitude = 0;
+    let voiceSamples = 0;
+    
     for (let i = 0; i < audioData.length; i++) {
-        if (Math.abs(audioData[i]) > 0.02) {
-            voiced = true;
-            break;
+        const amplitude = Math.abs(audioData[i]);
+        if (amplitude > maxAmplitude) {
+            maxAmplitude = amplitude;
+        }
+        // Count samples above threshold to detect sustained voice
+        // Slightly higher threshold (0.015) to reduce noise sensitivity
+        if (amplitude > 0.015) {
+            voiceSamples++;
         }
     }
     
+    // Require at least 10% of samples to be above threshold for sustained voice
+    const voiced = voiceSamples > (audioData.length * 0.1);
+    
+    // Log amplitude periodically to debug voice detection
+    if (turnBuffer.length % 100 === 0) {
+        console.log(`Audio amplitude: max=${maxAmplitude.toFixed(4)}, voiced=${voiced}, voice_samples=${voiceSamples}/${audioData.length}, buffer_size=${turnBuffer.length}`);
+    }
+    
+    // Track when voice was first detected (not just any audio)
+    if (voiced && lastVoiceTime === 0) {
+        console.log("Voice detected! Starting to record answer...");
+        lastVoiceTime = now; // Only set when voice is actually detected
+    }
+    
+    // Update lastVoiceTime only when voice is detected
     if (voiced) {
         lastVoiceTime = now;
     }
@@ -490,44 +721,105 @@ function handleAudioData(audioData) {
     turnBuffer.push(new Float32Array(audioData));
 
     const elapsed = now - (turnBufferStart || now);
-    const silenceElapsed = now - lastVoiceTime;
+    // Calculate silence: if no voice detected, silence = elapsed time
+    const silenceElapsed = lastVoiceTime > 0 ? (now - lastVoiceTime) : elapsed;
 
     if (!turnBufferStart) {
         turnBufferStart = now;
+        console.log("Started buffering audio at:", new Date().toISOString());
     }
 
-    const voicedDuration = elapsed - silenceElapsed;
+    // Calculate voiced duration: how long the candidate has actually been speaking
+    // This is total elapsed time minus silence time
+    // If no voice detected, duration is 0
+    const voicedDuration = lastVoiceTime > 0 ? (elapsed - silenceElapsed) : 0;
     let dynamicSilenceMs = vadSilenceMs;
     let dynamicMaxTurnMs = vadMaxTurnMs;
 
+    // Dynamically adjust thresholds based on actual speech length:
+    // - Short answers (< 2s of speech): shorter silence threshold (600ms) and max turn (15s)
+    // - Long answers (> 6s of speech): longer silence threshold (1500ms) and max turn (45s)
+    // - Medium answers: default thresholds (1200ms silence, 30s max turn)
     if (voicedDuration < 2000) {
+        // Short answer detected - candidate is speaking briefly
         dynamicSilenceMs = 600;
-        dynamicMaxTurnMs = 8000;
+        dynamicMaxTurnMs = 15000;
     } else if (voicedDuration > 6000) {
+        // Long answer detected - candidate is speaking at length
         dynamicSilenceMs = 1500;
-        dynamicMaxTurnMs = 18000;
+        dynamicMaxTurnMs = 45000;
     }
-
-    if (lastVoiceTime === 0) {
-        lastVoiceTime = now;
-    }
-    if ((silenceElapsed > dynamicSilenceMs && elapsed > vadMinVoiceMs) || elapsed > dynamicMaxTurnMs) {
+    
+    // CRITICAL FIX: Only finalize if we've actually detected voice
+    // Don't finalize on silence alone - require at least some voice detection
+    // Check if we've had at least 500ms of actual voice (not just background noise)
+    const hasDetectedVoice = lastVoiceTime > 0 && voicedDuration > 500; // At least 500ms of actual voice
+    
+    // Only finalize if:
+    // 1. We've detected actual voice (hasDetectedVoice)
+    // 2. AND (silence threshold exceeded OR max turn time exceeded)
+    if (capturing && hasDetectedVoice && (
+        (silenceElapsed > dynamicSilenceMs && elapsed > vadMinVoiceMs) || 
+        elapsed > dynamicMaxTurnMs
+    )) {
+        console.log(`Finalizing turn: elapsed=${elapsed.toFixed(0)}ms, silence=${silenceElapsed.toFixed(0)}ms, voiced_duration=${voicedDuration.toFixed(0)}ms, has_voice=${hasDetectedVoice}`);
         finalizeTurn();
-        turnBuffer = [];
-        turnBufferStart = null;
-        lastVoiceTime = 0;
     }
 }
 
 function startAudioProcessing() {
-    capturing = true;
+    // Clear any previous audio data before starting
     turnBuffer = [];
     turnBufferStart = null;
     lastVoiceTime = 0;
+    
+    // Check if media was set up successfully
+    if (!analyserNode) {
+        console.error("Cannot start audio processing: analyserNode is null. Media setup may have failed.");
+        showError("Microphone not available. Please refresh and allow microphone access.");
+        updateConversationState("ready");
+        return;
+    }
+    
+    if (!audioDataArray) {
+        console.error("Cannot start audio processing: audioDataArray is null.");
+        showError("Audio processing not initialized. Please refresh the page.");
+        updateConversationState("ready");
+        return;
+    }
+    
+    // Check and resume AudioContext if suspended (browser autoplay policy)
+    if (audioContext && audioContext.state === 'suspended') {
+        console.log("AudioContext is suspended, resuming...");
+        audioContext.resume().then(() => {
+            console.log("AudioContext resumed successfully");
+            startAudioProcessingInternal();
+        }).catch((err) => {
+            console.error("Failed to resume AudioContext:", err);
+            showError("Failed to activate microphone. Please click anywhere on the page and try again.");
+        });
+        return;
+    }
+    
+    startAudioProcessingInternal();
+}
+
+function startAudioProcessingInternal() {
+    capturing = true;
     updateConversationState("listening");
+    
+    console.log("Starting audio processing - ready to capture candidate response");
+    console.log("AudioContext state:", audioContext ? audioContext.state : "null");
+    console.log("AnalyserNode:", analyserNode, "AudioDataArray:", audioDataArray);
     
     if (!animationFrameId && analyserNode) {
         processAudio();
+        console.log("Audio processing loop started");
+    } else {
+        console.warn("Audio processing not started:", {
+            hasAnimationFrame: !!animationFrameId,
+            hasAnalyserNode: !!analyserNode
+        });
     }
 }
 
@@ -539,7 +831,7 @@ function stopAudioProcessing() {
     }
 }
 
-function float32ToWavBase64(buffers, sampleRate = 16000) {
+function float32ToWavBase64(buffers, sampleRate = 44100) {
     const length = buffers.reduce((acc, b) => acc + b.length, 0);
     const pcm16 = new Int16Array(length);
     let offset = 0;
@@ -588,15 +880,65 @@ function float32ToWavBase64(buffers, sampleRate = 16000) {
 }
 
 function finalizeTurn() {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (!turnBuffer || turnBuffer.length === 0) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        console.log("Cannot finalize turn: WebSocket not open");
+        return;
+    }
+    if (!turnBuffer || turnBuffer.length === 0) {
+        console.log("Cannot finalize turn: Empty buffer");
+        return;
+    }
     
+    // Don't send if we're not ready to answer (e.g., during countdown)
+    if (!isReadyToAnswer) {
+        console.log("Cannot finalize turn: Not ready to answer yet (countdown in progress)");
+        turnBuffer = [];
+        turnBufferStart = null;
+        lastVoiceTime = performance.now();
+        return;
+    }
+    
+    // Calculate total audio duration - use actual sample rate from audioContext
+    const actualSampleRate = audioContext ? audioContext.sampleRate : 44100;
+    const totalSamples = turnBuffer.reduce((acc, buf) => acc + buf.length, 0);
+    const durationSeconds = totalSamples / actualSampleRate;
+    
+    console.log(`Finalizing turn: ${durationSeconds.toFixed(2)}s of audio, ${turnBuffer.length} buffers, sample rate: ${actualSampleRate}Hz`);
+    
+    // CRITICAL FIX: Increase minimum duration and require actual voice content
+    // Don't send if audio is too short (less than 1.5 seconds) - likely noise or accidental trigger
+    // This prevents sending audio when candidate hasn't actually spoken
+    if (durationSeconds < 1.5) {
+        console.log("Audio too short or no voice detected, ignoring:", durationSeconds, "seconds");
+        // Reset buffer but keep listening
+        turnBuffer = [];
+        turnBufferStart = null;
+        lastVoiceTime = performance.now();
+        return;
+    }
+    
+    // Stop audio processing before sending to prevent multiple sends
+    stopAudioProcessing();
+    isReadyToAnswer = false; // Prevent sending again until next ready_to_listen
     updateConversationState("processing");
-    const base64Audio = float32ToWavBase64(turnBuffer, 16000);
+    
+    console.log("=== SENDING ANSWER TO BACKEND ===");
+    console.log(`Audio duration: ${durationSeconds.toFixed(2)} seconds`);
+    console.log(`Sample rate: ${actualSampleRate}Hz`);
+    console.log(`Buffer chunks: ${turnBuffer.length}`);
+    const base64Audio = float32ToWavBase64(turnBuffer, actualSampleRate);
+    console.log(`Base64 audio length: ${base64Audio.length} characters`);
+    console.log("===================================");
+    
     ws.send(
         JSON.stringify({
             type: "answer",
             data: { audio_base64: base64Audio, mime_type: "audio/wav" },
         })
     );
+    
+    // Clear buffer after sending
+    turnBuffer = [];
+    turnBufferStart = null;
+    lastVoiceTime = 0;
 }
