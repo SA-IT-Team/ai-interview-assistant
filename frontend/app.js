@@ -11,9 +11,6 @@ const uploadError = document.getElementById("uploadError");
 const questionText = document.getElementById("questionText");
 const transcriptLog = document.getElementById("transcriptLog");
 const timerDisplay = document.getElementById("timerDisplay");
-const progressDisplay = document.getElementById("progressDisplay");
-const progressBar = document.getElementById("progressBar");
-const progressPercent = document.getElementById("progressPercent");
 const conversationIndicator = document.getElementById("conversationIndicator");
 const conversationStatus = document.getElementById("conversationStatus");
 const indicatorDot = document.getElementById("indicatorDot");
@@ -36,12 +33,11 @@ let audioDataArray = null;
 let audioChunks = [];
 let interviewStartTime = null;
 let timerInterval = null;
-let questionCount = 0;
-let maxQuestions = 8;
 let isReadyToAnswer = false;
 let countdownInterval = null;
 let pendingReadyToListen = false;
 let isAudioPlaying = false;
+let isSendingAnswer = false; // Prevent multiple simultaneous sends
 
 // File upload handlers
 fileUploadArea.addEventListener("click", () => resumeFileInput.click());
@@ -178,14 +174,6 @@ function updateConversationState(state) {
     conversationStatus.textContent = stateInfo.text;
 }
 
-function updateProgress() {
-    questionCount++;
-    const percent = Math.min((questionCount / maxQuestions) * 100, 100);
-    progressBar.style.width = percent + "%";
-    progressPercent.textContent = Math.round(percent) + "%";
-    progressDisplay.textContent = `Question ${questionCount} of ${maxQuestions}`;
-}
-
 function startTimer() {
     interviewStartTime = Date.now();
     timerInterval = setInterval(() => {
@@ -216,6 +204,14 @@ async function startInterview() {
         showError("Resume is required to start interview");
         return;
     }
+
+    // Clear any stale audio buffers from previous sessions
+    turnBuffer = [];
+    turnBufferStart = null;
+    lastVoiceTime = 0;
+    isReadyToAnswer = false;
+    isSendingAnswer = false;
+    capturing = false;
 
     try {
         const role = "Software Engineer";
@@ -483,8 +479,8 @@ function startCountdownAndListening() {
 
 function handleJson(msg) {
     // Handle resume_summary early to prevent "Unknown message" warning
+    // Don't add to transcript - this is internal context only
     if (msg.type === "resume_summary") {
-        addTranscriptEntry("assistant", msg.text);
         return;
     }
     
@@ -495,6 +491,7 @@ function handleJson(msg) {
             isReadyToAnswer = false; // Reset flag - wait for ready_to_listen
             pendingReadyToListen = false; // Reset pending flag
             isAudioPlaying = false; // Reset audio playing flag
+            isSendingAnswer = false; // Reset sending flag
             // Clear any existing countdown
             if (countdownInterval) {
                 clearInterval(countdownInterval);
@@ -528,6 +525,12 @@ function handleJson(msg) {
             
             // Stop any existing audio processing first
             stopAudioProcessing();
+            
+            // CRITICAL: Clear any stale audio buffer before starting new capture
+            turnBuffer = [];
+            turnBufferStart = null;
+            lastVoiceTime = 0;
+            isSendingAnswer = false; // Reset sending flag
             
             // Clear any existing countdown
             if (countdownInterval) {
@@ -573,7 +576,6 @@ function handleJson(msg) {
             if (msg.end_interview) {
                 updateConversationState("processing");
             } else {
-                updateProgress();
                 updateConversationState("processing"); // Show processing while next question is generated
             }
             break;
@@ -889,6 +891,12 @@ function finalizeTurn() {
         return;
     }
     
+    // Prevent multiple sends
+    if (isSendingAnswer) {
+        console.warn("Already sending answer, ignoring duplicate call");
+        return;
+    }
+    
     // Don't send if we're not ready to answer (e.g., during countdown)
     if (!isReadyToAnswer) {
         console.log("Cannot finalize turn: Not ready to answer yet (countdown in progress)");
@@ -920,14 +928,27 @@ function finalizeTurn() {
     // Stop audio processing before sending to prevent multiple sends
     stopAudioProcessing();
     isReadyToAnswer = false; // Prevent sending again until next ready_to_listen
+    isSendingAnswer = true; // Set flag to prevent duplicate sends
     updateConversationState("processing");
     
     console.log("=== SENDING ANSWER TO BACKEND ===");
     console.log(`Audio duration: ${durationSeconds.toFixed(2)} seconds`);
     console.log(`Sample rate: ${actualSampleRate}Hz`);
     console.log(`Buffer chunks: ${turnBuffer.length}`);
+    console.log(`Current question context: ${questionText.textContent}`);
+    console.log(`Timestamp: ${new Date().toISOString()}`);
+    
+    // Create a hash of the audio to verify uniqueness
+    if (turnBuffer.length > 0 && turnBuffer[0].length > 0) {
+        const sampleHash = Array.from(turnBuffer[0].slice(0, Math.min(100, turnBuffer[0].length)))
+            .map(v => String.fromCharCode(Math.floor((v + 1) * 127)))
+            .join('');
+        console.log(`Audio hash (first 100 samples): ${btoa(sampleHash).substring(0, 20)}...`);
+    }
+    
     const base64Audio = float32ToWavBase64(turnBuffer, actualSampleRate);
     console.log(`Base64 audio length: ${base64Audio.length} characters`);
+    console.log(`Base64 audio preview: ${base64Audio.substring(0, 50)}...`);
     console.log("===================================");
     
     ws.send(
@@ -941,4 +962,5 @@ function finalizeTurn() {
     turnBuffer = [];
     turnBufferStart = null;
     lastVoiceTime = 0;
+    isSendingAnswer = false; // Reset flag after sending
 }

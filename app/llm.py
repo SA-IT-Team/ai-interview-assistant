@@ -10,6 +10,8 @@ SYSTEM_PROMPT = (
     "FLOW: After consent is given, ask 'Please introduce yourself focusing on your relevant experience.' "
     "Then ask adaptive, high-impact questions that are DYNAMICALLY GENERATED based on the candidate's previous answers. "
     "CRITICAL: Each question must be derived from what the candidate just said, not just from the resume. "
+    "NEVER repeat a question that has already been asked. "
+    "NEVER ask the same question twice, even if the candidate's answer was brief. "
     "Use the candidate's responses to: "
     "- Probe deeper into topics they mentioned (Why? How? Can you give an example? What was the outcome?) "
     "- Clarify vague statements or claims "
@@ -45,8 +47,8 @@ SYSTEM_PROMPT = (
 )
 
 GREETING_PROMPT = (
-    "Generate a friendly, professional greeting introducing yourself as SAJ from SA Technologies. "
-    "The greeting must include: 'Hi, I am SAJ from SA Technologies. I will ask you some questions based on your profile. Shall we start?' "
+    "Generate a friendly, professional greeting introducing yourself as Saj (pronounced as a single name, not spelled out letter by letter) from SA Technologies. "
+    "The greeting must include: 'Hi, I am Saj from SA Technologies. I will ask you some questions based on your profile. Shall we start?' "
     "Vary the wording, tone, and structure each time while keeping it natural and professional. "
     "You can add a brief personal touch or variation, but always include the core message. "
     "Return ONLY the greeting text, nothing else."
@@ -72,7 +74,7 @@ async def generate_greeting(candidate_name: Optional[str] = None) -> str:
         ],
         temperature=0.7,
     )
-    greeting = resp.choices[0].message.content or "Hi, I am SAJ from SA Technologies. I will ask you some questions based on your profile. Shall we start?"
+    greeting = resp.choices[0].message.content or "Hi, I am Saj from SA Technologies. I will ask you some questions based on your profile. Shall we start?"
     return greeting.strip()
 
 
@@ -131,8 +133,16 @@ async def call_llm(
         f"Resume context:\n{resume_text}\n"
         f"Flow status: {flow_context}\n"
         f"Full conversation history:\n{history_summary or 'None'}\n"
-        f"Candidate's latest answer:\n{transcript}\n"
-        f"Signal quality assessment: {signal_quality} (avg score: {avg_score:.1f}, high scores: {high_score_count}, low scores: {low_score_count}, avg answer length: {int(avg_answer_length)} chars)\n"
+        f"\n=== CRITICAL: CANDIDATE'S LATEST ANSWER ===\n"
+        f"{transcript}\n"
+        f"=== END LATEST ANSWER ===\n\n"
+        f"IMPORTANT: The 'next_question' you generate MUST be a follow-up question based on what the candidate just said above. "
+        f"Do NOT repeat any question from the conversation history. "
+        f"Extract specific topics, projects, skills, or experiences mentioned in their latest answer and ask about those. "
+        f"For example, if they mentioned 'AI chatbot project', ask about that project specifically. "
+        f"If they mentioned '5.5 years of experience', ask about a specific challenging project from that experience. "
+        f"If they mentioned 'generative AI', ask them to explain how they've used it or what challenges they faced. "
+        f"\nSignal quality assessment: {signal_quality} (avg score: {avg_score:.1f}, high scores: {high_score_count}, low scores: {low_score_count}, avg answer length: {int(avg_answer_length)} chars)\n"
         "Return JSON only."
     )
     resp = await client.chat.completions.create(

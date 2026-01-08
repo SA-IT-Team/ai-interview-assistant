@@ -20,6 +20,12 @@ async def transcribe_base64_audio(
     settings = get_settings()
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     audio_bytes = base64.b64decode(audio_base64)
+    
+    # Validate audio size (should be at least a few KB for real speech)
+    if len(audio_bytes) < 1000:  # Less than 1KB is suspicious
+        logger.warning(f"Audio too small: {len(audio_bytes)} bytes - likely invalid")
+        return None
+    
     file_like = io.BytesIO(audio_bytes)
     file_like.name = f"audio.{mime_type.split('/')[-1]}"
     

@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import time
@@ -276,6 +278,17 @@ async def interview(ws: WebSocket):
                 continue
 
             payload = AnswerPayload(**msg["data"])
+            
+            # Log audio details for debugging
+            audio_bytes = base64.b64decode(payload.audio_base64)
+            logger.info(f"=== RECEIVED AUDIO ===")
+            logger.info(f"Audio size: {len(audio_bytes)} bytes")
+            logger.info(f"MIME type: {payload.mime_type}")
+            logger.info(f"Current question: '{current_question[:100] if current_question else 'None'}...'")
+            logger.info(f"Audio hash (first 100 bytes): {hashlib.md5(audio_bytes[:100]).hexdigest()}")
+            logger.info(f"Timestamp: {datetime.now().isoformat()}")
+            logger.info(f"=========================")
+            
             transcript = await transcribe_base64_audio(
                 payload.audio_base64, 
                 payload.mime_type,
@@ -454,6 +467,37 @@ async def interview(ws: WebSocket):
                 return
 
             current_question = llm_result.next_question
+            
+            # Prevent question repetition
+            if state.history:
+                previous_questions = [turn["q"].lower().strip() for turn in state.history]
+                current_question_lower = current_question.lower().strip()
+                
+                # Check for exact matches or very similar questions (80% similarity threshold)
+                is_repeat = False
+                for prev_q in previous_questions:
+                    if current_question_lower == prev_q:
+                        is_repeat = True
+                        break
+                    # Check for high similarity (simple word overlap check)
+                    current_words = set(current_question_lower.split())
+                    prev_words = set(prev_q.split())
+                    if len(current_words) > 0 and len(prev_words) > 0:
+                        overlap = len(current_words & prev_words) / max(len(current_words), len(prev_words))
+                        if overlap > 0.8:  # 80% word overlap indicates repetition
+                            is_repeat = True
+                            break
+                
+                if is_repeat:
+                    logger.warning(f"LLM attempted to repeat question: '{current_question}'. Generating alternative follow-up.")
+                    # Generate a fallback follow-up based on the latest answer
+                    latest_answer = state.history[-1]["a"] if state.history else transcript
+                    # Extract key phrases and create a specific follow-up
+                    answer_words = latest_answer.split()[:20]  # First 20 words
+                    key_phrase = " ".join(answer_words[-5:]) if len(answer_words) >= 5 else latest_answer[:50]
+                    current_question = f"Can you tell me more about {key_phrase}? Specifically, what challenges did you face and how did you overcome them?"
+                    logger.info(f"Generated alternative follow-up: '{current_question}'")
+            
             await ws.send_json({"type": "question_text", "text": current_question})
             
             # Stream TTS audio with error handling
