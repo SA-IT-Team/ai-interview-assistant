@@ -1,4 +1,0 @@
-# FastAPI interview assistant package
-
-
-
