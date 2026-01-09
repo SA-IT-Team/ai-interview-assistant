@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime
@@ -32,9 +33,29 @@ logging.basicConfig(
 )
 
 # Configure CORS - must be added before routes
+# Get frontend URL from environment (Railway will set this)
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5174")
+
+# Build allowed origins list
+allowed_origins = [
+    FRONTEND_URL,
+    "http://localhost:5174",  # Local development
+]
+
+# In production on Railway, if FRONTEND_URL is set, use it; otherwise allow all for flexibility
+# Note: For production, it's recommended to set FRONTEND_URL environment variable
+if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_SERVICE_NAME"):
+    # We're on Railway - if FRONTEND_URL is explicitly set, use it; otherwise allow all
+    if FRONTEND_URL == "http://localhost:5174":
+        # FRONTEND_URL not set, allow all origins (Railway will handle HTTPS)
+        allowed_origins = ["*"]
+        logger.info("Running on Railway without FRONTEND_URL set - allowing all origins")
+    else:
+        logger.info(f"Running on Railway with FRONTEND_URL={FRONTEND_URL}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins like ["http://localhost:5174"]
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
