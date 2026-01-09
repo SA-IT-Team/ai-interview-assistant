@@ -100,6 +100,9 @@ class SessionState(BaseModel):
     # Simple counters for clarification / struggle tracking (used by flow logic)
     clarification_attempts: int = 0
     struggle_streak: int = 0
+    # Follow-up tracking: prevent getting stuck on same topic
+    current_topic: Optional[str] = None  # Current topic being discussed
+    followup_count: int = 0  # Number of consecutive follow-ups on current_topic
     # Timestamps / flags
     interview_started_at: Optional[str] = None
     consent_given: bool = False

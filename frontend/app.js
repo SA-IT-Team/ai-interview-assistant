@@ -22,12 +22,16 @@ let resumeContext = null;
 let audioContext, mediaStreamSource, analyserNode;
 let audioPlaybackContext = null;
 let capturing = false;
-let vadSilenceMs = 1200;
-let vadMinVoiceMs = 600;
-let vadMaxTurnMs = 30000; // Increased from 12000 to 30000 (30 seconds) for longer answers
+let vadSilenceMs = 1200; // Base threshold (will be adapted dynamically)
+let vadMinVoiceMs = 600; // Minimum voice duration before allowing finalization
+// No hardcoded max time limit - fully dynamic based on candidate's speaking pattern
 let lastVoiceTime = 0;
 let turnBuffer = [];
 let turnBufferStart = null;
+// Adaptive tracking variables for dynamic silence detection
+let pauseHistory = []; // Track recent pause durations during speech
+let speechSegments = []; // Track speech/pause segments
+let adaptiveSilenceThreshold = 1200; // Dynamic threshold that adapts to speaking pattern
 let animationFrameId = null;
 let audioDataArray = null;
 let audioChunks = [];
@@ -38,6 +42,7 @@ let countdownInterval = null;
 let pendingReadyToListen = false;
 let isAudioPlaying = false;
 let isSendingAnswer = false; // Prevent multiple simultaneous sends
+let pendingQuestionText = null; // Store question text until audio starts playing
 
 // File upload handlers
 fileUploadArea.addEventListener("click", () => resumeFileInput.click());
@@ -212,6 +217,10 @@ async function startInterview() {
     isReadyToAnswer = false;
     isSendingAnswer = false;
     capturing = false;
+    // Reset adaptive tracking
+    pauseHistory = [];
+    speechSegments = [];
+    adaptiveSilenceThreshold = 1200;
 
     try {
         const role = "Software Engineer";
@@ -262,6 +271,24 @@ async function startInterview() {
                     // Reset state for new audio stream
                     audioChunks = [];
                     isReceivingAudio = false;
+                    
+                    // Set a timeout to display text if no audio arrives within 5 seconds
+                    // This handles edge cases where TTS fails silently or is very slow
+                    setTimeout(() => {
+                        if (pendingQuestionText && audioChunks.length === 0) {
+                            console.warn("No audio received after 5 seconds, displaying text anyway");
+                            questionText.textContent = pendingQuestionText;
+                            const transcriptEntries = document.querySelectorAll('.transcript-entry');
+                            const lastEntry = transcriptEntries[transcriptEntries.length - 1];
+                            const isDuplicate = lastEntry && 
+                                                lastEntry.classList.contains('assistant') && 
+                                                lastEntry.textContent.trim() === pendingQuestionText.trim();
+                            if (!isDuplicate) {
+                                addTranscriptEntry("assistant", pendingQuestionText);
+                            }
+                            // Don't clear pendingQuestionText here - let audio handler clear it when it arrives
+                        }
+                    }, 5000);
                 }
                 
                 handleJson(msg);
@@ -307,6 +334,23 @@ async function startInterview() {
             // Create blob and try both methods: HTML5 audio and Web Audio API
             const blob = new Blob(audioChunks, { type: "audio/mpeg" });
             const url = URL.createObjectURL(blob);
+            
+            // Display question text NOW, synchronized with audio playback start
+            // This ensures text and audio appear simultaneously for natural conversation feel
+            if (pendingQuestionText) {
+                questionText.textContent = pendingQuestionText;
+                // Add to transcript only if it's different from what's already displayed
+                const transcriptEntries = document.querySelectorAll('.transcript-entry');
+                const lastEntry = transcriptEntries[transcriptEntries.length - 1];
+                const isDuplicate = lastEntry && 
+                                    lastEntry.classList.contains('assistant') && 
+                                    lastEntry.textContent.trim() === pendingQuestionText.trim();
+                
+                if (!isDuplicate) {
+                    addTranscriptEntry("assistant", pendingQuestionText);
+                }
+                pendingQuestionText = null; // Clear after displaying
+            }
             
             updateConversationState("speaking");
             isAudioPlaying = true; // Track that audio is playing
@@ -502,19 +546,10 @@ function handleJson(msg) {
             turnBufferStart = null;
             lastVoiceTime = 0;
             
-            // Update question display
-            questionText.textContent = msg.text;
-            // Only add to transcript if it's different from what's already displayed
-            // Check if the last transcript entry is the same question to avoid duplication
-            const transcriptEntries = document.querySelectorAll('.transcript-entry');
-            const lastEntry = transcriptEntries[transcriptEntries.length - 1];
-            const isDuplicate = lastEntry && 
-                                lastEntry.classList.contains('assistant') && 
-                                lastEntry.textContent.trim() === msg.text.trim();
+            // Store question text but don't display it yet - wait for audio to start playing
+            // This ensures text and audio appear simultaneously
+            pendingQuestionText = msg.text;
             
-            if (!isDuplicate) {
-                addTranscriptEntry("assistant", msg.text);
-            }
             // Don't start listening yet - wait for ready_to_listen signal
             // Audio will be played when stream completes (handled in onmessage)
             updateConversationState("speaking");
@@ -531,6 +566,11 @@ function handleJson(msg) {
             turnBufferStart = null;
             lastVoiceTime = 0;
             isSendingAnswer = false; // Reset sending flag
+            
+            // Reset adaptive tracking for new answer
+            pauseHistory = [];
+            speechSegments = [];
+            adaptiveSilenceThreshold = 1200; // Reset to base threshold
             
             // Clear any existing countdown
             if (countdownInterval) {
@@ -599,6 +639,19 @@ function handleJson(msg) {
         case "tts_error":
             console.error("TTS Error:", msg.message);
             showError("Audio generation failed: " + msg.message);
+            // Display pending question text even if TTS failed
+            if (pendingQuestionText) {
+                questionText.textContent = pendingQuestionText;
+                const transcriptEntries = document.querySelectorAll('.transcript-entry');
+                const lastEntry = transcriptEntries[transcriptEntries.length - 1];
+                const isDuplicate = lastEntry && 
+                                    lastEntry.classList.contains('assistant') && 
+                                    lastEntry.textContent.trim() === pendingQuestionText.trim();
+                if (!isDuplicate) {
+                    addTranscriptEntry("assistant", pendingQuestionText);
+                }
+                pendingQuestionText = null;
+            }
             addTranscriptEntry("assistant", `[Audio Error: ${msg.message}]`);
             // ready_to_listen will be sent after tts_error, so don't start here
             break;
@@ -713,6 +766,50 @@ function handleAudioData(audioData) {
     if (voiced && lastVoiceTime === 0) {
         console.log("Voice detected! Starting to record answer...");
         lastVoiceTime = now; // Only set when voice is actually detected
+        // Reset adaptive tracking for new answer
+        pauseHistory = [];
+        speechSegments = [];
+        adaptiveSilenceThreshold = 1200; // Reset to base threshold
+    }
+    
+    // Track speech segments and pauses for adaptive learning
+    const previousVoiced = speechSegments.length > 0 ? speechSegments[speechSegments.length - 1].voiced : false;
+    if (voiced !== previousVoiced) {
+        // State change: voice started or stopped
+        if (previousVoiced !== undefined) {
+            // We have a previous state, record the segment
+            const segmentStart = speechSegments.length > 0 ? speechSegments[speechSegments.length - 1].end : (turnBufferStart || now);
+            const segmentDuration = now - segmentStart;
+            
+            if (!previousVoiced && segmentDuration > 200) {
+                // This was a pause (silence segment > 200ms)
+                pauseHistory.push(segmentDuration);
+                // Keep only last 5 pauses for adaptive calculation
+                if (pauseHistory.length > 5) {
+                    pauseHistory.shift();
+                }
+                
+                // Adapt silence threshold based on observed pause patterns
+                if (pauseHistory.length >= 2) {
+                    // Calculate average pause duration, add 50% buffer for natural completion
+                    const avgPause = pauseHistory.reduce((a, b) => a + b, 0) / pauseHistory.length;
+                    const maxPause = Math.max(...pauseHistory);
+                    // Adaptive threshold: use max observed pause + 30% buffer, but at least 1500ms
+                    adaptiveSilenceThreshold = Math.max(1500, maxPause * 1.3);
+                    console.log(`Adaptive silence threshold updated: ${adaptiveSilenceThreshold.toFixed(0)}ms (based on ${pauseHistory.length} pauses, max: ${maxPause.toFixed(0)}ms)`);
+                }
+            }
+        }
+        
+        // Record new segment
+        speechSegments.push({
+            voiced: voiced,
+            start: now,
+            end: now
+        });
+    } else if (speechSegments.length > 0) {
+        // Update current segment end time
+        speechSegments[speechSegments.length - 1].end = now;
     }
     
     // Update lastVoiceTime only when voice is detected
@@ -735,36 +832,25 @@ function handleAudioData(audioData) {
     // This is total elapsed time minus silence time
     // If no voice detected, duration is 0
     const voicedDuration = lastVoiceTime > 0 ? (elapsed - silenceElapsed) : 0;
-    let dynamicSilenceMs = vadSilenceMs;
-    let dynamicMaxTurnMs = vadMaxTurnMs;
-
-    // Dynamically adjust thresholds based on actual speech length:
-    // - Short answers (< 2s of speech): shorter silence threshold (600ms) and max turn (15s)
-    // - Long answers (> 6s of speech): longer silence threshold (1500ms) and max turn (45s)
-    // - Medium answers: default thresholds (1200ms silence, 30s max turn)
-    if (voicedDuration < 2000) {
-        // Short answer detected - candidate is speaking briefly
-        dynamicSilenceMs = 600;
-        dynamicMaxTurnMs = 15000;
-    } else if (voicedDuration > 6000) {
-        // Long answer detected - candidate is speaking at length
-        dynamicSilenceMs = 1500;
-        dynamicMaxTurnMs = 45000;
-    }
     
-    // CRITICAL FIX: Only finalize if we've actually detected voice
+    // CRITICAL: Only finalize if we've actually detected voice
     // Don't finalize on silence alone - require at least some voice detection
     // Check if we've had at least 500ms of actual voice (not just background noise)
     const hasDetectedVoice = lastVoiceTime > 0 && voicedDuration > 500; // At least 500ms of actual voice
     
-    // Only finalize if:
-    // 1. We've detected actual voice (hasDetectedVoice)
-    // 2. AND (silence threshold exceeded OR max turn time exceeded)
+    // Fully dynamic finalization:
+    // 1. Must have detected actual voice
+    // 2. Must have exceeded adaptive silence threshold (learned from candidate's speaking pattern)
+    // 3. Must have minimum voice duration (600ms) to avoid accidental triggers
+    // 4. No hardcoded max time limit - let candidate speak as long as needed
+    //    (Only use a very high safety limit of 5 minutes to prevent infinite recording)
+    const SAFETY_MAX_TIME_MS = 300000; // 5 minutes absolute maximum (safety only)
+    
     if (capturing && hasDetectedVoice && (
-        (silenceElapsed > dynamicSilenceMs && elapsed > vadMinVoiceMs) || 
-        elapsed > dynamicMaxTurnMs
+        (silenceElapsed > adaptiveSilenceThreshold && elapsed > vadMinVoiceMs) || 
+        elapsed > SAFETY_MAX_TIME_MS
     )) {
-        console.log(`Finalizing turn: elapsed=${elapsed.toFixed(0)}ms, silence=${silenceElapsed.toFixed(0)}ms, voiced_duration=${voicedDuration.toFixed(0)}ms, has_voice=${hasDetectedVoice}`);
+        console.log(`Finalizing turn: elapsed=${elapsed.toFixed(0)}ms, silence=${silenceElapsed.toFixed(0)}ms, voiced_duration=${voicedDuration.toFixed(0)}ms, adaptive_threshold=${adaptiveSilenceThreshold.toFixed(0)}ms, has_voice=${hasDetectedVoice}`);
         finalizeTurn();
     }
 }
