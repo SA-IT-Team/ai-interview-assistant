@@ -15,11 +15,13 @@ from fastapi.responses import JSONResponse
 from .config import get_settings
 from .schemas import AnswerPayload, LlmResult, SessionState, StartPayload
 from .stt import transcribe_base64_audio
-from .llm import call_llm, generate_greeting
+from .llm import call_llm, generate_greeting, prepare_llm_context
 from .tts import stream_eleven, TTSException
 from .resume import extract_text_from_pdf, summarize_resume
+from .schemas import ResumeContext
 
 logger = logging.getLogger(__name__)
+
 
 app = FastAPI(title="AI Interview Assistant", version="0.1.0")
 
@@ -239,23 +241,54 @@ async def interview(ws: WebSocket):
         # Generate varied greeting
         greeting = await generate_greeting(candidate_name)
         current_question = greeting
+        # Send question text immediately (frontend will display when audio starts)
         await ws.send_json({"type": "question_text", "text": current_question})
         
-        # Stream TTS audio with error handling
-        logger.info(f"Starting TTS for greeting: {len(current_question)} characters")
-        try:
-            chunk_count = 0
-            async for chunk in stream_eleven(current_question):
-                await ws.send_bytes(chunk)
-                chunk_count += 1
-            logger.info(f"TTS streaming completed: {chunk_count} chunks sent")
-            # Signal that audio is complete and system is ready to listen
-            await ws.send_json({"type": "ready_to_listen"})
-        except TTSException as e:
-            logger.error(f"TTS failed for greeting: {str(e)}")
-            await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
-            # Even on TTS error, allow text-based interview
-            await ws.send_json({"type": "ready_to_listen"})
+        # Stream TTS audio in background - text already sent, so user sees it while audio generates
+        async def stream_greeting_tts():
+            try:
+                logger.info(f"Starting TTS for greeting: {len(current_question)} characters")
+                chunk_count = 0
+                async for chunk in stream_eleven(current_question):
+                    await ws.send_bytes(chunk)
+                    chunk_count += 1
+                logger.info(f"TTS streaming completed: {chunk_count} chunks sent")
+                await ws.send_json({"type": "ready_to_listen"})
+            except TTSException as e:
+                logger.error(f"TTS failed for greeting: {str(e)}")
+                await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
+                await ws.send_json({"type": "ready_to_listen"})
+            except Exception as e:
+                logger.error(f"Unexpected error in greeting TTS streaming: {str(e)}", exc_info=True)
+                # Ensure ready_to_listen is always sent, even on unexpected errors
+                await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
+                await ws.send_json({"type": "ready_to_listen"})
+        
+        # Start TTS streaming as background task with error callback
+        greeting_tts_task = asyncio.create_task(stream_greeting_tts())
+        
+        def greeting_tts_callback(task):
+            try:
+                if task.exception():
+                    logger.error(f"Greeting TTS task failed with exception: {task.exception()}", exc_info=True)
+                else:
+                    logger.info(f"Greeting TTS task completed successfully")
+            except Exception as e:
+                logger.error(f"Error in greeting TTS task callback: {str(e)}", exc_info=True)
+        
+        greeting_tts_task.add_done_callback(greeting_tts_callback)
+        
+        # Add safety timeout for greeting TTS
+        async def greeting_safety_timeout():
+            await asyncio.sleep(30)
+            if not greeting_tts_task.done():
+                logger.warning("Greeting TTS task taking too long (>30s), sending ready_to_listen as safety measure")
+                try:
+                    await ws.send_json({"type": "ready_to_listen"})
+                except Exception as e:
+                    logger.error(f"Error sending safety ready_to_listen for greeting: {str(e)}")
+        
+        asyncio.create_task(greeting_safety_timeout())
 
         # Main turn loop
         while True:
@@ -289,23 +322,58 @@ async def interview(ws: WebSocket):
             logger.info(f"Timestamp: {datetime.now().isoformat()}")
             logger.info(f"=========================")
             
-            transcript = await transcribe_base64_audio(
-                payload.audio_base64, 
-                payload.mime_type,
-                current_question=current_question
+            # OPTIMIZATION: Start transcription and LLM context preparation in parallel
+            turn_start_time = time.time()
+            
+            # Start transcription task (this is the main bottleneck)
+            transcription_task = asyncio.create_task(
+                transcribe_base64_audio(
+                    payload.audio_base64, 
+                    payload.mime_type,
+                    current_question=current_question
+                )
             )
+            
+            # OPTIMIZATION: Prepare LLM context in parallel while transcription is running
+            # This pre-computes resume text, history summary, and signal quality metrics
+            llm_prep_task = asyncio.create_task(
+                prepare_llm_context(
+                    state=state,
+                    current_question=current_question,
+                    role=state.role,
+                    level=state.level,
+                    has_asked_intro=state.has_asked_intro,
+                    has_asked_behavioral=state.has_asked_behavioral,
+                    question_count=state.question_count,
+                    followup_count=state.followup_count,
+                    force_new_topic=state.followup_count >= 3,
+                )
+            )
+            
+            # Wait for transcription to complete (this is still the bottleneck)
+            transcript = await transcription_task
             
             # Stricter validation: reject empty or whitespace-only transcripts
             if not transcript or not transcript.strip():
                 logger.warning(f"Received empty or invalid transcript, ignoring answer")
-                await ws.send_json({"type": "error", "message": "transcription failed or empty"})
-                # Don't repeat question immediately - wait for next answer attempt
+                await ws.send_json({
+                    "type": "turn_result",
+                    "transcript": "[Could not transcribe audio - please try again]",
+                    "score": 0,
+                    "rationale": "Audio transcription failed or was too quiet. Please speak clearly and try again.",
+                    "red_flags": [],
+                    "end_interview": False,
+                })
+                # Send ready_to_listen to allow candidate to try again
+                await ws.send_json({"type": "ready_to_listen"})
                 continue
             
             # Log the actual transcript for debugging - this should always be the real Whisper result
+            transcription_time = time.time() - turn_start_time
             logger.info(f"=== TRANSCRIPT RECEIVED ===")
             logger.info(f"Full transcript: '{transcript}'")
             logger.info(f"Transcript length: {len(transcript)} characters")
+            logger.info(f"Transcription completed in {transcription_time:.2f}s")
             logger.info(f"Current question: '{current_question[:100] if current_question else 'None'}...'")
             logger.info(f"===========================")
 
@@ -349,44 +417,124 @@ async def interview(ws: WebSocket):
                     # Don't call LLM for consent answer - proceed directly to intro question
                     # Set the intro question directly
                     current_question = "Please introduce yourself in 60 seconds focusing on your most relevant experience for this role."
+                    # Send question text immediately (frontend will display when audio starts)
                     await ws.send_json({"type": "question_text", "text": current_question})
                     
-                    # Stream TTS for intro question
-                    logger.info(f"Starting TTS for intro question: {len(current_question)} characters")
-                    try:
-                        chunk_count = 0
-                        async for chunk in stream_eleven(current_question):
-                            await ws.send_bytes(chunk)
-                            chunk_count += 1
-                        logger.info(f"TTS streaming completed: {chunk_count} chunks sent")
-                        await ws.send_json({"type": "ready_to_listen"})
-                    except TTSException as e:
-                        logger.error(f"TTS failed for intro question: {str(e)}")
-                        await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
-                        await ws.send_json({"type": "ready_to_listen"})
+                    # Stream TTS for intro question in background
+                    async def stream_intro_tts():
+                        try:
+                            logger.info(f"Starting TTS for intro question: {len(current_question)} characters")
+                            chunk_count = 0
+                            async for chunk in stream_eleven(current_question):
+                                await ws.send_bytes(chunk)
+                                chunk_count += 1
+                            logger.info(f"TTS streaming completed: {chunk_count} chunks sent")
+                            await ws.send_json({"type": "ready_to_listen"})
+                        except TTSException as e:
+                            logger.error(f"TTS failed for intro question: {str(e)}")
+                            await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
+                            await ws.send_json({"type": "ready_to_listen"})
+                        except Exception as e:
+                            logger.error(f"Unexpected error in intro TTS streaming: {str(e)}", exc_info=True)
+                            await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
+                            await ws.send_json({"type": "ready_to_listen"})
+                    
+                    # Start TTS streaming as background task with error callback
+                    intro_tts_task = asyncio.create_task(stream_intro_tts())
+                    
+                    def intro_tts_callback(task):
+                        try:
+                            if task.exception():
+                                logger.error(f"Intro TTS task failed with exception: {task.exception()}", exc_info=True)
+                            else:
+                                logger.info(f"Intro TTS task completed successfully")
+                        except Exception as e:
+                            logger.error(f"Error in intro TTS task callback: {str(e)}", exc_info=True)
+                    
+                    intro_tts_task.add_done_callback(intro_tts_callback)
+                    
+                    # Add safety timeout for intro TTS
+                    async def intro_safety_timeout():
+                        await asyncio.sleep(30)
+                        if not intro_tts_task.done():
+                            logger.warning("Intro TTS task taking too long (>30s), sending ready_to_listen as safety measure")
+                            try:
+                                await ws.send_json({"type": "ready_to_listen"})
+                            except Exception as e:
+                                logger.error(f"Error sending safety ready_to_listen for intro: {str(e)}")
+                    
+                    asyncio.create_task(intro_safety_timeout())
                     
                     # Continue to next iteration to wait for intro answer
-                    continue
+                continue
 
+            # OPTIMIZATION: LLM context preparation should be complete by now
+            # Wait for it if it's not done yet (should be very fast)
+            prepared_context = await llm_prep_task
+            prep_time = time.time() - turn_start_time
+            logger.info(f"LLM context prepared in {prep_time:.2f}s (parallel with transcription)")
+            
             # Call LLM for scoring + next question (only after consent is given)
-            logger.info(f"Calling LLM: question_count={state.question_count}, has_asked_intro={state.has_asked_intro}, has_asked_behavioral={state.has_asked_behavioral}, transcript='{transcript[:50]}...'")
+            # LLM will intelligently handle all validation (response quality, resume inconsistencies, etc.)
+            force_new_topic = state.followup_count >= 3
+            llm_start_time = time.time()
+            logger.info(f"Calling LLM: question_count={state.question_count}, has_asked_intro={state.has_asked_intro}, has_asked_behavioral={state.has_asked_behavioral}, followup_count={state.followup_count}, force_new_topic={force_new_topic}, transcript='{transcript[:50]}...'")
             llm_result: LlmResult = await call_llm(
                 role=state.role,
                 level=state.level,
                 history=state.history,
-                transcript=transcript,
+                transcript=transcript,  # Pass transcript directly - LLM handles all validation
                 resume=state.resume_context,
                 has_asked_intro=state.has_asked_intro,
                 has_asked_behavioral=state.has_asked_behavioral,
                 question_count=state.question_count,
+                followup_count=state.followup_count,
+                force_new_topic=force_new_topic,
+                prepared_context=prepared_context,  # OPTIMIZATION: Use pre-prepared context
+                current_question=current_question,  # Pass current question for context-aware validation
             )
-            logger.info(f"LLM response: answer_score={llm_result.answer_score}, question_type={llm_result.question_type}, end_interview={llm_result.end_interview}")
+            llm_time = time.time() - llm_start_time
+            logger.info(f"LLM call completed in {llm_time:.2f}s")
+            
+            # Log if LLM detected any issues
+            if llm_result.answer_score <= 1:
+                logger.warning(f"LLM detected low-quality response (score={llm_result.answer_score}): {llm_result.rationale}")
+            if any("resume" in flag.lower() or "inconsistency" in flag.lower() for flag in llm_result.red_flags):
+                logger.warning(f"LLM detected resume inconsistency: {llm_result.red_flags}")
+                logger.info(f"LLM generated clarification: '{llm_result.next_question}'")
+            
+            logger.info(f"LLM response: answer_score={llm_result.answer_score}, question_type={llm_result.question_type}, end_interview={llm_result.end_interview}, red_flags={llm_result.red_flags}")
 
-            # Track question types and struggle streak
+            # Track question types and follow-ups
             if llm_result.question_type == "intro":
                 state.has_asked_intro = True
+                state.current_topic = None  # Reset topic tracking for new question type
+                state.followup_count = 0
             elif llm_result.question_type == "behavioral":
                 state.has_asked_behavioral = True
+                state.current_topic = None  # Reset topic tracking for new question type
+                state.followup_count = 0
+            elif llm_result.question_type == "followup":
+                # Check if we're following up on the same topic
+                if state.current_topic:
+                    state.followup_count += 1
+                    logger.info(f"Follow-up question #{state.followup_count} on topic: {state.current_topic[:50]}...")
+                else:
+                    # First follow-up, set the topic based on current question
+                    state.current_topic = current_question[:50]  # Use first 50 chars as topic identifier
+                    state.followup_count = 1
+                    logger.info(f"Starting follow-up sequence on topic: {state.current_topic}")
+            else:
+                # New question type (technical, etc.) - reset follow-up tracking
+                state.current_topic = None
+                state.followup_count = 0
+
+            # Check if we've exceeded follow-up limit (3 consecutive follow-ups)
+            if state.followup_count >= 3:
+                logger.info(f"Reached follow-up limit ({state.followup_count}) on topic. Forcing new question from resume.")
+                # Reset tracking - will force new topic in next LLM call
+                state.current_topic = None
+                state.followup_count = 0
 
             # Very simple struggle heuristic based on low answer scores.
             if llm_result.answer_score <= 2:
@@ -498,23 +646,57 @@ async def interview(ws: WebSocket):
                     current_question = f"Can you tell me more about {key_phrase}? Specifically, what challenges did you face and how did you overcome them?"
                     logger.info(f"Generated alternative follow-up: '{current_question}'")
             
+            # Send question text IMMEDIATELY (frontend will display when audio starts)
+            # This reduces perceived latency - user sees question while TTS generates
             await ws.send_json({"type": "question_text", "text": current_question})
             
-            # Stream TTS audio with error handling
-            logger.info(f"Starting TTS for question: {len(current_question)} characters")
-            try:
-                chunk_count = 0
-                async for chunk in stream_eleven(current_question):
-                    await ws.send_bytes(chunk)
-                    chunk_count += 1
-                logger.info(f"TTS streaming completed: {chunk_count} chunks sent")
-                # Signal that audio is complete and system is ready to listen
-                await ws.send_json({"type": "ready_to_listen"})
-            except TTSException as e:
-                logger.error(f"TTS failed for question: {str(e)}")
-                await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
-                # Even on TTS error, allow text-based interview
-                await ws.send_json({"type": "ready_to_listen"})
+            # Stream TTS audio in background task - runs in parallel
+            # Text already sent, so user sees it while audio generates
+            async def stream_question_tts():
+                try:
+                    logger.info(f"Starting TTS for question: {len(current_question)} characters")
+                    chunk_count = 0
+                    async for chunk in stream_eleven(current_question):
+                        await ws.send_bytes(chunk)
+                        chunk_count += 1
+                    logger.info(f"TTS streaming completed: {chunk_count} chunks sent")
+                    await ws.send_json({"type": "ready_to_listen"})
+                except TTSException as e:
+                    logger.error(f"TTS failed for question: {str(e)}")
+                    await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
+                    await ws.send_json({"type": "ready_to_listen"})
+                except Exception as e:
+                    logger.error(f"Unexpected error in TTS streaming: {str(e)}", exc_info=True)
+                    # Ensure ready_to_listen is always sent, even on unexpected errors
+                    await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
+                    await ws.send_json({"type": "ready_to_listen"})
+            
+            # Start TTS streaming as background task - non-blocking
+            # Store the task to ensure it completes and doesn't fail silently
+            question_tts_task = asyncio.create_task(stream_question_tts())
+            
+            def tts_task_callback(task):
+                try:
+                    if task.exception():
+                        logger.error(f"Question TTS task failed with exception: {task.exception()}", exc_info=True)
+                    else:
+                        logger.info(f"Question TTS task completed successfully")
+                except Exception as e:
+                    logger.error(f"Error in TTS task callback: {str(e)}", exc_info=True)
+            
+            question_tts_task.add_done_callback(tts_task_callback)
+            
+            # Add a safety timeout: if TTS doesn't complete in 30 seconds, send ready_to_listen anyway
+            async def safety_timeout():
+                await asyncio.sleep(30)
+                if not question_tts_task.done():
+                    logger.warning("TTS task taking too long (>30s), sending ready_to_listen as safety measure")
+                    try:
+                        await ws.send_json({"type": "ready_to_listen"})
+                    except Exception as e:
+                        logger.error(f"Error sending safety ready_to_listen: {str(e)}")
+            
+            asyncio.create_task(safety_timeout())
 
     except WebSocketDisconnect:
         return

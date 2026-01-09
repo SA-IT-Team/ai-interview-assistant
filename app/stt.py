@@ -16,10 +16,20 @@ async def transcribe_base64_audio(
     """
     Transcribe a base64-encoded audio payload using OpenAI Whisper API.
     Returns the text transcript or None on failure.
+    
+    OPTIMIZED: Added timeout and timing logs for latency tracking.
     """
+    import time
+    start_time = time.time()
+    
     settings = get_settings()
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=30.0)  # OPTIMIZATION: Add timeout
     audio_bytes = base64.b64decode(audio_base64)
+    
+    # OPTIMIZATION: Log audio size for optimization tracking
+    audio_size_mb = len(audio_bytes) / (1024 * 1024)
+    if audio_size_mb > 2.0:
+        logger.warning(f"Large audio file: {audio_size_mb:.2f}MB - may take longer to transcribe")
     
     # Validate audio size (should be at least a few KB for real speech)
     if len(audio_bytes) < 1000:  # Less than 1KB is suspicious
@@ -44,9 +54,11 @@ async def transcribe_base64_audio(
     prompt = " ".join(prompt_parts)
     
     try:
-        logger.info(f"Transcribing audio: {len(audio_bytes)} bytes, format: {mime_type}")
+        logger.info(f"Transcribing audio: {len(audio_bytes)} bytes ({audio_size_mb:.2f}MB), format: {mime_type}")
         if current_question:
             logger.info(f"Using question context: {current_question[:100]}...")
+        
+        api_start = time.time()
         result = await client.audio.transcriptions.create(
             file=file_like,
             model="whisper-1",
@@ -54,14 +66,20 @@ async def transcribe_base64_audio(
             response_format="json",
             prompt=prompt
         )
+        api_time = time.time() - api_start
+        
         transcript = result.text.strip()
+        total_time = time.time() - start_time
+        
         logger.info(f"=== TRANSCRIPTION SUCCESSFUL ===")
         logger.info(f"Full transcript: '{transcript}'")
         logger.info(f"Transcript length: {len(transcript)} characters")
+        logger.info(f"Transcription time: {total_time:.2f}s (API: {api_time:.2f}s)")
         if current_question:
             logger.info(f"Question context was: '{current_question[:100]}...'")
         logger.info(f"=================================")
         return transcript if transcript else None
     except Exception as e:
-        logger.error(f"Transcription failed: {str(e)}", exc_info=True)
+        elapsed = time.time() - start_time
+        logger.error(f"Transcription failed after {elapsed:.2f}s: {str(e)}", exc_info=True)
         return None
