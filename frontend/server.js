@@ -3,9 +3,8 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
-const PORT = process.env.PORT || 5174;
 
-// Get backend URL from environment (Railway will set this)
+// Get backend URL from environment (Vercel or Railway will set this)
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
 const WS_URL = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/interview';
 
@@ -32,8 +31,17 @@ app.get('/', (req, res) => {
     res.send(html);
 });
 
-app.listen(PORT, () => {
-    console.log(`Frontend server running on port ${PORT}`);
-    console.log(`Backend URL: ${BACKEND_URL}`);
-    console.log(`WebSocket URL: ${WS_URL}`);
-});
+// Export for Vercel serverless (Vercel will handle the server)
+// For local development or Railway, we still need app.listen
+if (process.env.VERCEL) {
+    // Vercel serverless mode
+    module.exports = app;
+} else {
+    // Local development or Railway
+    const PORT = process.env.PORT || 5174;
+    app.listen(PORT, () => {
+        console.log(`Frontend server running on port ${PORT}`);
+        console.log(`Backend URL: ${BACKEND_URL}`);
+        console.log(`WebSocket URL: ${WS_URL}`);
+    });
+}
