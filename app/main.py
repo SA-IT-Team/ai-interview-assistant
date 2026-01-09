@@ -42,21 +42,30 @@ allowed_origins = [
     "http://localhost:5174",  # Local development
 ]
 
-# In production on Railway, if FRONTEND_URL is set, use it; otherwise allow all for flexibility
-# Note: For production, it's recommended to set FRONTEND_URL environment variable
-if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_SERVICE_NAME"):
-    # We're on Railway - if FRONTEND_URL is explicitly set, use it; otherwise allow all
-    if FRONTEND_URL == "http://localhost:5174":
-        # FRONTEND_URL not set, allow all origins (Railway will handle HTTPS)
-        allowed_origins = ["*"]
-        logger.info("Running on Railway without FRONTEND_URL set - allowing all origins")
-    else:
-        logger.info(f"Running on Railway with FRONTEND_URL={FRONTEND_URL}")
+# Determine if we should allow all origins (for Vercel support)
+# Note: FastAPI CORSMiddleware doesn't support wildcard patterns like "https://*.vercel.app"
+allow_all_origins = False
 
+if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_SERVICE_NAME"):
+    # We're on Railway - allow all origins to support Vercel and other platforms
+    # This is safe because Railway handles HTTPS and we're in a controlled environment
+    allowed_origins = ["*"]
+    allow_all_origins = True
+    logger.info("Running on Railway - allowing all origins (supports Vercel, Railway, etc.)")
+elif FRONTEND_URL != "http://localhost:5174" and "vercel.app" in FRONTEND_URL:
+    # Frontend is on Vercel - allow all origins since we can't use wildcards
+    allowed_origins = ["*"]
+    allow_all_origins = True
+    logger.info(f"Frontend detected on Vercel - allowing all origins for flexibility")
+else:
+    logger.info(f"Running with FRONTEND_URL={FRONTEND_URL}")
+
+# Note: allow_credentials cannot be True when allow_origins=["*"]
+# This is a browser security restriction
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_credentials=not allow_all_origins,  # Disable credentials when allowing all origins
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
