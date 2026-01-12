@@ -1,25 +1,16 @@
-// Wait for config to be available (in case script loads before config)
-const getConfig = () => {
-    if (window.__APP_CONFIG__) {
-        return window.__APP_CONFIG__;
-    }
-    // If config not available yet, wait a bit and check again
-    return null;
-};
-
-// Get config with fallback
-const config = getConfig() || {};
+// Config is injected at build time, so it should always be available
+const config = window.__APP_CONFIG__ || {};
 const wsUrl = config.WS_URL || "ws://localhost:8000/ws/interview";
 const apiUrl = config.API_URL || "http://localhost:8000";
 
 // Log for debugging
 console.log('API Configuration:', { apiUrl, wsUrl, configAvailable: !!window.__APP_CONFIG__ });
 
-// Warn if using localhost in production (not on localhost)
-if (apiUrl.includes('localhost') && !window.location.hostname.includes('localhost')) {
-    console.error('⚠️ CONFIGURATION ERROR: Backend URL is set to localhost but app is running on', window.location.hostname);
-    console.error('⚠️ Please set BACKEND_URL environment variable in Vercel to your Railway backend URL');
-    console.error('⚠️ Current config:', window.__APP_CONFIG__);
+// Warn if using localhost in production
+if (window.location.hostname.includes('vercel.app') && apiUrl.includes('localhost')) {
+    console.warn('⚠️ CONFIGURATION ERROR: Backend URL is set to localhost but app is running on Vercel.');
+    console.warn('⚠️ Please ensure BACKEND_URL environment variable is set in Vercel.');
+    console.warn('⚠️ Current config:', window.__APP_CONFIG__);
 }
 
 // DOM Elements

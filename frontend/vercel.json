@@ -1,12 +1,12 @@
 {
   "version": 2,
   "installCommand": "npm install",
-  "buildCommand": "",
-  "outputDirectory": "",
+  "buildCommand": "node build-config.js",
+  "outputDirectory": ".",
   "rewrites": [
     {
       "source": "/(.*)",
-      "destination": "/api/index"
+      "destination": "/index.html"
     }
   ]
 }
