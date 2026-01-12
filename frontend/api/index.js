@@ -11,8 +11,13 @@ const WS_URL = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss:
 // Get the frontend root directory (parent of api directory)
 const frontendRoot = path.join(__dirname, '..');
 
-// Serve static files (CSS, JS, etc.)
-app.use(express.static(frontendRoot));
+// Serve static files (CSS, JS, etc.) - but only for non-API routes
+app.use((req, res, next) => {
+    if (req.path.startsWith('/api/')) {
+        return next();
+    }
+    express.static(frontendRoot)(req, res, next);
+});
 
 // Inject config and serve HTML for all routes
 app.get('*', (req, res) => {
@@ -41,4 +46,5 @@ app.get('*', (req, res) => {
     res.send(html);
 });
 
+// Export as Vercel serverless function
 module.exports = app;
