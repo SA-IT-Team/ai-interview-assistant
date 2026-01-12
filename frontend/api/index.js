@@ -1,8 +1,5 @@
-const express = require('express');
 const path = require('path');
 const fs = require('fs');
-
-const app = express();
 
 // Get backend URL from environment (Vercel will set this)
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
@@ -11,55 +8,57 @@ const WS_URL = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss:
 // Get the frontend root directory (parent of api directory)
 const frontendRoot = path.join(__dirname, '..');
 
-// Helper to serve static files manually
-function serveStaticFile(req, res, next) {
-    if (req.path.startsWith('/api/')) {
-        return next();
-    }
-    
-    // Map common file extensions to MIME types
-    const mimeTypes = {
-        '.html': 'text/html',
-        '.js': 'application/javascript',
-        '.css': 'text/css',
-        '.json': 'application/json',
-        '.png': 'image/png',
-        '.jpg': 'image/jpeg',
-        '.gif': 'image/gif',
-        '.svg': 'image/svg+xml',
-        '.ico': 'image/x-icon'
-    };
-    
-    const filePath = path.join(frontendRoot, req.path);
-    const ext = path.extname(filePath).toLowerCase();
-    
-    // Check if file exists and serve it
-    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-        const content = fs.readFileSync(filePath);
-        const contentType = mimeTypes[ext] || 'application/octet-stream';
-        res.setHeader('Content-Type', contentType);
-        return res.send(content);
-    }
-    
-    next();
-}
+// Map common file extensions to MIME types
+const mimeTypes = {
+    '.html': 'text/html',
+    '.js': 'application/javascript',
+    '.css': 'text/css',
+    '.json': 'application/json',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.svg': 'image/svg+xml',
+    '.ico': 'image/x-icon',
+    '.woff': 'font/woff',
+    '.woff2': 'font/woff2',
+    '.ttf': 'font/ttf'
+};
 
-// Serve static files
-app.use(serveStaticFile);
-
-// Inject config and serve HTML for all routes
-app.get('*', (req, res) => {
+// Vercel serverless function handler
+module.exports = (req, res) => {
     // Skip API routes
-    if (req.path.startsWith('/api/')) {
-        return res.status(404).json({ error: 'Not found' });
+    if (req.url.startsWith('/api/')) {
+        res.statusCode = 404;
+        res.setHeader('Content-Type', 'application/json');
+        return res.end(JSON.stringify({ error: 'Not found' }));
     }
     
-    // Serve index.html with injected config
-    const indexPath = path.join(frontendRoot, 'index.html');
-    let html = fs.readFileSync(indexPath, 'utf8');
+    // Get the file path
+    let filePath = req.url === '/' ? 'index.html' : req.url.split('?')[0];
+    filePath = path.join(frontendRoot, filePath);
     
-    // Inject config script if not already present
-    const configScript = `
+    // Security: prevent directory traversal
+    const normalizedPath = path.normalize(filePath);
+    if (!normalizedPath.startsWith(frontendRoot)) {
+        res.statusCode = 403;
+        res.setHeader('Content-Type', 'text/plain');
+        return res.end('Forbidden');
+    }
+    
+    // Check if file exists
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+        const ext = path.extname(filePath).toLowerCase();
+        const contentType = mimeTypes[ext] || 'application/octet-stream';
+        const content = fs.readFileSync(filePath);
+        
+        res.statusCode = 200;
+        res.setHeader('Content-Type', contentType);
+        
+        // If it's index.html, inject config
+        if (filePath.endsWith('index.html')) {
+            let html = content.toString('utf8');
+            const configScript = `
     <script>
       window.__APP_CONFIG__ = {
         API_URL: "${BACKEND_URL}",
@@ -67,12 +66,34 @@ app.get('*', (req, res) => {
       };
     </script>
     `;
+            html = html.replace('</head>', configScript + '</head>');
+            return res.end(html);
+        }
+        
+        return res.end(content);
+    }
     
-    // Insert config script before closing </head> tag
-    html = html.replace('</head>', configScript + '</head>');
+    // If file doesn't exist, serve index.html (for SPA routing)
+    const indexPath = path.join(frontendRoot, 'index.html');
+    if (fs.existsSync(indexPath)) {
+        let html = fs.readFileSync(indexPath, 'utf8');
+        const configScript = `
+    <script>
+      window.__APP_CONFIG__ = {
+        API_URL: "${BACKEND_URL}",
+        WS_URL: "${WS_URL}"
+      };
+    </script>
+    `;
+        html = html.replace('</head>', configScript + '</head>');
+        
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'text/html');
+        return res.end(html);
+    }
     
-    res.send(html);
-});
-
-// Export as Vercel serverless function
-module.exports = app;
+    // 404 if index.html doesn't exist
+    res.statusCode = 404;
+    res.setHeader('Content-Type', 'text/plain');
+    res.end('Not found');
+};
