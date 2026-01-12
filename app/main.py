@@ -180,48 +180,124 @@ async def upload_resume(file: UploadFile = File(...)):
     start_time = time.time()
     
     try:
-        file_size = file.size if hasattr(file, 'size') else None
-        elapsed = time.time() - start_time
-        logger.info(f"[{request_id}] [{elapsed:.2f}s] Received resume upload request: {file.filename}, size: {file_size}")
+        # Validate filename
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No filename provided.")
         
-        if not file.filename or not file.filename.lower().endswith(".pdf"):
+        if not file.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Only PDF resumes are supported.")
         
         elapsed = time.time() - start_time
-        logger.info(f"[{request_id}] [{elapsed:.2f}s] Reading file content...")
-        content = await file.read()
+        logger.info(f"[{request_id}] [{elapsed:.2f}s] Received resume upload request: {file.filename}")
+        
+        # Read file content with size validation
         elapsed = time.time() - start_time
-        logger.info(f"[{request_id}] [{elapsed:.2f}s] File read: {len(content)} bytes")
+        logger.info(f"[{request_id}] [{elapsed:.2f}s] Reading file content...")
+        
+        # Read in chunks to handle large files and detect size early
+        MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB limit
+        content = b""
+        chunk_size = 1024 * 1024  # 1MB chunks
+        
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            content += chunk
+            if len(content) > MAX_FILE_SIZE:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"File too large. Maximum size is {MAX_FILE_SIZE / (1024*1024):.0f}MB."
+                )
+        
+        elapsed = time.time() - start_time
+        logger.info(f"[{request_id}] [{elapsed:.2f}s] File read: {len(content)} bytes ({len(content)/(1024*1024):.2f}MB)")
         
         if not content:
             raise HTTPException(status_code=400, detail="File is empty.")
         
+        # Validate file is actually a PDF (check magic bytes)
+        if not content.startswith(b'%PDF'):
+            raise HTTPException(status_code=400, detail="File does not appear to be a valid PDF.")
+        
         elapsed = time.time() - start_time
         logger.info(f"[{request_id}] [{elapsed:.2f}s] Starting PDF text extraction...")
-        text = await extract_text_from_pdf(content, request_id)  # Now async, pass request_id
+        
+        # Extract text with timeout protection
+        try:
+            text = await asyncio.wait_for(
+                extract_text_from_pdf(content, request_id),
+                timeout=30.0  # 30 second timeout for PDF extraction
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start_time
+            logger.error(f"[{request_id}] [{elapsed:.2f}s] PDF extraction timed out after 30s")
+            raise HTTPException(
+                status_code=500,
+                detail="PDF processing took too long. Please try with a smaller or simpler PDF file."
+            )
+        
         elapsed = time.time() - start_time
         logger.info(f"[{request_id}] [{elapsed:.2f}s] PDF extraction completed: {len(text)} characters")
         
         if not text.strip():
-            raise HTTPException(status_code=400, detail="Could not extract text from PDF.")
+            raise HTTPException(status_code=400, detail="Could not extract text from PDF. The file may be image-based or corrupted.")
         
         elapsed = time.time() - start_time
         logger.info(f"[{request_id}] [{elapsed:.2f}s] Starting OpenAI summarization...")
-        summary = await summarize_resume(text, request_id)  # Pass request_id
+        
+        # Summarize with timeout protection
+        try:
+            summary = await asyncio.wait_for(
+                summarize_resume(text, request_id),
+                timeout=70.0  # 70 second timeout for OpenAI API (slightly longer than internal timeout)
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start_time
+            logger.error(f"[{request_id}] [{elapsed:.2f}s] OpenAI summarization timed out after 70s")
+            raise HTTPException(
+                status_code=500,
+                detail="Resume analysis took too long. Please try again or contact support."
+            )
+        except ValueError as ve:
+            # Re-raise ValueError from summarize_resume (timeout errors)
+            elapsed = time.time() - start_time
+            logger.error(f"[{request_id}] [{elapsed:.2f}s] OpenAI summarization error: {str(ve)}")
+            raise HTTPException(status_code=500, detail=str(ve))
+        
         elapsed = time.time() - start_time
         logger.info(f"[{request_id}] [{elapsed:.2f}s] OpenAI summarization completed")
         
         elapsed = time.time() - start_time
-        logger.info(f"[{request_id}] [{elapsed:.2f}s] Resume processing completed successfully")
+        logger.info(f"[{request_id}] [{elapsed:.2f}s] Resume processing completed successfully (total: {elapsed:.2f}s)")
+        
         return {"resume_context": summary}
+        
     except HTTPException:
         elapsed = time.time() - start_time
         logger.error(f"[{request_id}] [{elapsed:.2f}s] HTTPException raised")
         raise
     except Exception as e:
         elapsed = time.time() - start_time
-        logger.error(f"[{request_id}] [{elapsed:.2f}s] Error processing resume: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error processing resume: {str(e)}")
+        error_msg = str(e)
+        logger.error(f"[{request_id}] [{elapsed:.2f}s] Error processing resume: {error_msg}", exc_info=True)
+        
+        # Provide more user-friendly error messages
+        if "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+            raise HTTPException(
+                status_code=500,
+                detail="Request timed out. The resume processing took too long. Please try again with a smaller PDF file."
+            )
+        elif "connection" in error_msg.lower() or "network" in error_msg.lower():
+            raise HTTPException(
+                status_code=500,
+                detail="Network error occurred. Please check your connection and try again."
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error processing resume: {error_msg}. Please try again or contact support."
+            )
 
 
 @app.websocket("/ws/interview")

@@ -2,8 +2,13 @@ const path = require('path');
 const fs = require('fs');
 
 // Get backend URL from environment (Vercel will set this)
+// Note: Environment variable name must be exactly "BACKEND_URL" (not BACKEN_URL)
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
 const WS_URL = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/interview';
+
+// Log for debugging (will appear in Vercel function logs)
+console.log('Serverless function: BACKEND_URL from env =', process.env.BACKEND_URL);
+console.log('Serverless function: Using BACKEND_URL =', BACKEND_URL);
 
 // Get the frontend root directory (parent of api directory)
 const frontendRoot = path.join(__dirname, '..');
@@ -59,19 +64,21 @@ module.exports = (req, res) => {
         if (filePath.endsWith('index.html')) {
             let html = content.toString('utf8');
             const configScript = `<script>
-      window.__APP_CONFIG__ = {
-        API_URL: "${BACKEND_URL}",
-        WS_URL: "${WS_URL}"
-      };
-      console.log('Config loaded:', window.__APP_CONFIG__);
+      (function() {
+        window.__APP_CONFIG__ = {
+          API_URL: "${BACKEND_URL}",
+          WS_URL: "${WS_URL}"
+        };
+        console.log('Config loaded:', window.__APP_CONFIG__);
+        console.log('Backend URL from env:', "${BACKEND_URL}");
+      })();
     </script>`;
-            // Inject before closing head tag, or before first script if no head tag
+            // Always inject in head, before any other scripts
             if (html.includes('</head>')) {
                 html = html.replace('</head>', configScript + '\n    </head>');
-            } else if (html.includes('<script')) {
-                html = html.replace('<script', configScript + '\n    <script');
             } else {
-                html = html.replace('</body>', configScript + '\n    </body>');
+                // If no head tag, inject at the very beginning
+                html = configScript + '\n' + html;
             }
             return res.end(html);
         }
@@ -84,19 +91,21 @@ module.exports = (req, res) => {
     if (fs.existsSync(indexPath)) {
         let html = fs.readFileSync(indexPath, 'utf8');
         const configScript = `<script>
-      window.__APP_CONFIG__ = {
-        API_URL: "${BACKEND_URL}",
-        WS_URL: "${WS_URL}"
-      };
-      console.log('Config loaded:', window.__APP_CONFIG__);
+      (function() {
+        window.__APP_CONFIG__ = {
+          API_URL: "${BACKEND_URL}",
+          WS_URL: "${WS_URL}"
+        };
+        console.log('Config loaded:', window.__APP_CONFIG__);
+        console.log('Backend URL from env:', "${BACKEND_URL}");
+      })();
     </script>`;
-        // Inject before closing head tag, or before first script if no head tag
+        // Always inject in head, before any other scripts
         if (html.includes('</head>')) {
             html = html.replace('</head>', configScript + '\n    </head>');
-        } else if (html.includes('<script')) {
-            html = html.replace('<script', configScript + '\n    <script');
         } else {
-            html = html.replace('</body>', configScript + '\n    </body>');
+            // If no head tag, inject at the very beginning
+            html = configScript + '\n' + html;
         }
         
         res.statusCode = 200;
