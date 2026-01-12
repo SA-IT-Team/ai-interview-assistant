@@ -15,6 +15,13 @@ const apiUrl = config.API_URL || "http://localhost:8000";
 // Log for debugging
 console.log('API Configuration:', { apiUrl, wsUrl, configAvailable: !!window.__APP_CONFIG__ });
 
+// Warn if using localhost in production (not on localhost)
+if (apiUrl.includes('localhost') && !window.location.hostname.includes('localhost')) {
+    console.error('⚠️ CONFIGURATION ERROR: Backend URL is set to localhost but app is running on', window.location.hostname);
+    console.error('⚠️ Please set BACKEND_URL environment variable in Vercel to your Railway backend URL');
+    console.error('⚠️ Current config:', window.__APP_CONFIG__);
+}
+
 // DOM Elements
 const uploadScreen = document.getElementById("uploadScreen");
 const loadingScreen = document.getElementById("loadingScreen");
