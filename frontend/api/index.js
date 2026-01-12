@@ -2,7 +2,9 @@ const path = require('path');
 const fs = require('fs');
 
 // Get backend URL from environment
-const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+// Remove trailing slash if present
+let BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+BACKEND_URL = BACKEND_URL.replace(/\/+$/, ''); // Remove trailing slashes
 const WS_URL = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/interview';
 
 // Get the frontend root directory
