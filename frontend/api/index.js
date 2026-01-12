@@ -11,13 +11,41 @@ const WS_URL = BACKEND_URL.replace('http://', 'ws://').replace('https://', 'wss:
 // Get the frontend root directory (parent of api directory)
 const frontendRoot = path.join(__dirname, '..');
 
-// Serve static files (CSS, JS, etc.) - but only for non-API routes
-app.use((req, res, next) => {
+// Helper to serve static files manually
+function serveStaticFile(req, res, next) {
     if (req.path.startsWith('/api/')) {
         return next();
     }
-    express.static(frontendRoot)(req, res, next);
-});
+    
+    // Map common file extensions to MIME types
+    const mimeTypes = {
+        '.html': 'text/html',
+        '.js': 'application/javascript',
+        '.css': 'text/css',
+        '.json': 'application/json',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.svg': 'image/svg+xml',
+        '.ico': 'image/x-icon'
+    };
+    
+    const filePath = path.join(frontendRoot, req.path);
+    const ext = path.extname(filePath).toLowerCase();
+    
+    // Check if file exists and serve it
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+        const content = fs.readFileSync(filePath);
+        const contentType = mimeTypes[ext] || 'application/octet-stream';
+        res.setHeader('Content-Type', contentType);
+        return res.send(content);
+    }
+    
+    next();
+}
+
+// Serve static files
+app.use(serveStaticFile);
 
 // Inject config and serve HTML for all routes
 app.get('*', (req, res) => {
