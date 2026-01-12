@@ -1,5 +1,19 @@
-const wsUrl = (window.__APP_CONFIG__ && window.__APP_CONFIG__.WS_URL) || "ws://localhost:8000/ws/interview";
-const apiUrl = (window.__APP_CONFIG__ && window.__APP_CONFIG__.API_URL) || "http://localhost:8000";
+// Wait for config to be available (in case script loads before config)
+const getConfig = () => {
+    if (window.__APP_CONFIG__) {
+        return window.__APP_CONFIG__;
+    }
+    // If config not available yet, wait a bit and check again
+    return null;
+};
+
+// Get config with fallback
+const config = getConfig() || {};
+const wsUrl = config.WS_URL || "ws://localhost:8000/ws/interview";
+const apiUrl = config.API_URL || "http://localhost:8000";
+
+// Log for debugging
+console.log('API Configuration:', { apiUrl, wsUrl, configAvailable: !!window.__APP_CONFIG__ });
 
 // DOM Elements
 const uploadScreen = document.getElementById("uploadScreen");

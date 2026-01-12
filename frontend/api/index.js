@@ -58,15 +58,21 @@ module.exports = (req, res) => {
         // If it's index.html, inject config
         if (filePath.endsWith('index.html')) {
             let html = content.toString('utf8');
-            const configScript = `
-    <script>
+            const configScript = `<script>
       window.__APP_CONFIG__ = {
         API_URL: "${BACKEND_URL}",
         WS_URL: "${WS_URL}"
       };
-    </script>
-    `;
-            html = html.replace('</head>', configScript + '</head>');
+      console.log('Config loaded:', window.__APP_CONFIG__);
+    </script>`;
+            // Inject before closing head tag, or before first script if no head tag
+            if (html.includes('</head>')) {
+                html = html.replace('</head>', configScript + '\n    </head>');
+            } else if (html.includes('<script')) {
+                html = html.replace('<script', configScript + '\n    <script');
+            } else {
+                html = html.replace('</body>', configScript + '\n    </body>');
+            }
             return res.end(html);
         }
         
@@ -77,15 +83,21 @@ module.exports = (req, res) => {
     const indexPath = path.join(frontendRoot, 'index.html');
     if (fs.existsSync(indexPath)) {
         let html = fs.readFileSync(indexPath, 'utf8');
-        const configScript = `
-    <script>
+        const configScript = `<script>
       window.__APP_CONFIG__ = {
         API_URL: "${BACKEND_URL}",
         WS_URL: "${WS_URL}"
       };
-    </script>
-    `;
-        html = html.replace('</head>', configScript + '</head>');
+      console.log('Config loaded:', window.__APP_CONFIG__);
+    </script>`;
+        // Inject before closing head tag, or before first script if no head tag
+        if (html.includes('</head>')) {
+            html = html.replace('</head>', configScript + '\n    </head>');
+        } else if (html.includes('<script')) {
+            html = html.replace('<script', configScript + '\n    <script');
+        } else {
+            html = html.replace('</body>', configScript + '\n    </body>');
+        }
         
         res.statusCode = 200;
         res.setHeader('Content-Type', 'text/html');
