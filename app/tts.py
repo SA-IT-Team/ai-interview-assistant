@@ -64,7 +64,7 @@ async def stream_eleven(text: str):
         
         # Add helpful message for 401 errors
         if e.response.status_code == 401:
-            error_message += " (Check that ELEVEN_API_KEY is set correctly in Railway environment variables)"
+            error_message += " (Check that ELEVEN_API_KEY is set correctly in your deployment environment variables)"
             logger.error(f"401 Unauthorized - API Key length: {len(settings.eleven_api_key)}, Voice ID: {settings.eleven_voice_id}")
             logger.error(f"API Key preview: {api_key_preview}")
             if error_details:

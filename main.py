@@ -1,6 +1,6 @@
 """
-Railway entry point - imports the FastAPI app from app.main
-This allows Railpack to auto-detect the FastAPI application.
+Entry point - imports the FastAPI app from app.main
+This allows deployment platforms to auto-detect the FastAPI application.
 """
 from app.main import app
 
