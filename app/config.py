@@ -1,7 +1,10 @@
 from functools import lru_cache
 from typing import Optional
+import logging
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -17,7 +20,16 @@ class Settings(BaseSettings):
         if not v or not v.strip():
             field_name = info.field_name
             raise ValueError(f"{field_name} cannot be empty. Please set the {field_name.upper()} environment variable.")
-        return v.strip()
+        validated = v.strip()
+        
+        # Log validation (mask sensitive data)
+        if info.field_name == "eleven_api_key":
+            preview = validated[:8] + "..." + validated[-4:] if len(validated) > 12 else "***"
+            logger.info(f"Loaded {info.field_name}: {preview} (length: {len(validated)})")
+        else:
+            logger.info(f"Loaded {info.field_name}: {validated}")
+        
+        return validated
 
     # Tunables - using Field with env parameter
     tts_stability: float = Field(default=0.45, env="ELEVEN_TTS_STABILITY")
@@ -37,4 +49,11 @@ class Settings(BaseSettings):
 
 @lru_cache()
 def get_settings() -> Settings:
+    """Get settings instance (cached). Clear cache if environment variables change."""
     return Settings()
+
+
+def clear_settings_cache():
+    """Clear the settings cache. Useful when environment variables are updated."""
+    get_settings.cache_clear()
+    logger.info("Settings cache cleared")
