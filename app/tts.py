@@ -38,7 +38,24 @@ async def stream_eleven(text: str):
                         yield chunk
                     await asyncio.sleep(0)  # cooperative scheduling
     except httpx.HTTPStatusError as e:
-        raise TTSException(f"ElevenLabs API error: {e.response.status_code} - {e.response.text}")
+        # For streaming responses, we need to read the response before accessing .text
+        error_message = f"ElevenLabs API error: {e.response.status_code}"
+        try:
+            # Try to read the error response body
+            # For streaming responses, use aread() to read the body
+            error_body = await e.response.aread()
+            if error_body:
+                error_message += f" - {error_body.decode('utf-8', errors='ignore')}"
+        except (AttributeError, httpx.ResponseNotRead, Exception):
+            # If we can't read the error body (streaming response not read, or other error),
+            # just use the status code - this is fine for error reporting
+            pass
+        
+        # Add helpful message for 401 errors
+        if e.response.status_code == 401:
+            error_message += " (Check that ELEVEN_API_KEY is set correctly in Railway environment variables)"
+        
+        raise TTSException(error_message)
     except httpx.RequestError as e:
         raise TTSException(f"Network error calling ElevenLabs: {str(e)}")
     except Exception as e:
