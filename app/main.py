@@ -37,17 +37,23 @@ logging.basicConfig(
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5174")
 
 # Build allowed origins list
-allowed_origins = [
-    FRONTEND_URL,
-    "http://localhost:5174",  # Local development
-]
-
-logger.info(f"Configured CORS allowed_origins={allowed_origins}")
+# In production (non-localhost), allow all origins for flexibility
+# In local development, only allow localhost
+if FRONTEND_URL == "http://localhost:5174":
+    # Local development - restrict to localhost
+    allowed_origins = ["http://localhost:5174"]
+    allow_credentials = True
+    logger.info(f"Local development - CORS restricted to localhost")
+else:
+    # Production - allow all origins (frontend on Vercel, backend on Render)
+    allowed_origins = ["*"]
+    allow_credentials = False  # Must be False when using wildcard
+    logger.info(f"Production mode - allowing all origins (FRONTEND_URL={FRONTEND_URL})")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_credentials=allow_credentials,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
