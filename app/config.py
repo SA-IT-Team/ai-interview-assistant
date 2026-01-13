@@ -22,12 +22,10 @@ class Settings(BaseSettings):
             raise ValueError(f"{field_name} cannot be empty. Please set the {field_name.upper()} environment variable.")
         validated = v.strip()
         
-        # Log validation (mask sensitive data)
-        if info.field_name == "eleven_api_key":
-            preview = validated[:8] + "..." + validated[-4:] if len(validated) > 12 else "***"
-            logger.info(f"Loaded {info.field_name}: {preview} (length: {len(validated)})")
-        else:
+        # Only log non-sensitive fields (voice_id is safe to log)
+        if info.field_name == "eleven_voice_id":
             logger.info(f"Loaded {info.field_name}: {validated}")
+        # Do not log API keys, even masked, in production logs
         
         return validated
 

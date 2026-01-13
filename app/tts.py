@@ -18,9 +18,8 @@ async def stream_eleven(text: str):
     """
     settings = get_settings()
     
-    # Debug logging (mask API key for security)
-    api_key_preview = settings.eleven_api_key[:8] + "..." + settings.eleven_api_key[-4:] if len(settings.eleven_api_key) > 12 else "***"
-    logger.info(f"TTS Request - Voice ID: {settings.eleven_voice_id}, API Key: {api_key_preview}, Key length: {len(settings.eleven_api_key)}")
+    # Do not log API key information - security best practice
+    logger.info(f"TTS Request - Voice ID: {settings.eleven_voice_id}")
     
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{settings.eleven_voice_id}/stream"
     headers = {
@@ -65,8 +64,8 @@ async def stream_eleven(text: str):
         # Add helpful message for 401 errors
         if e.response.status_code == 401:
             error_message += " (Check that ELEVEN_API_KEY is set correctly in your deployment environment variables)"
-            logger.error(f"401 Unauthorized - API Key length: {len(settings.eleven_api_key)}, Voice ID: {settings.eleven_voice_id}")
-            logger.error(f"API Key preview: {api_key_preview}")
+            logger.error(f"401 Unauthorized - Voice ID: {settings.eleven_voice_id}")
+            # Do not log API key information
             if error_details:
                 logger.error(f"ElevenLabs error response: {error_details}")
         
