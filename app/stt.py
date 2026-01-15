@@ -1,7 +1,8 @@
+import asyncio
 import base64
 import io
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 from openai import AsyncOpenAI
 from .config import get_settings
 
@@ -83,3 +84,27 @@ async def transcribe_base64_audio(
         elapsed = time.time() - start_time
         logger.error(f"Transcription failed after {elapsed:.2f}s: {str(e)}", exc_info=True)
         return None
+
+
+async def transcribe_with_early_reasoning(
+    audio_base64: str,
+    mime_type: str,
+    current_question: Optional[str],
+    state,
+    prepared_context: dict,
+    call_llm_func
+) -> Tuple[Optional[str], Optional[any]]:
+    """
+    Simplified transcription - removed incremental approach that was adding latency.
+    Now just uses single transcription call for better performance and accuracy.
+    
+    Returns: (transcript, None) - no early reasoning to avoid latency overhead
+    """
+    # SIMPLIFIED: Just use single transcription call - it's faster and more accurate
+    # The incremental approach was actually slower (2 API calls) and caused quality issues
+    try:
+        transcript = await transcribe_base64_audio(audio_base64, mime_type, current_question)
+        return transcript, None  # No early reasoning - it adds latency without benefit
+    except Exception as e:
+        logger.error(f"Transcription failed: {str(e)}", exc_info=True)
+        return None, None

@@ -200,27 +200,163 @@
         .conversation-indicator {
             display: flex;
             align-items: center;
-            gap: 10px;
-            padding: 10px 20px;
+            gap: 12px;
+            padding: 12px 24px;
             background: rgba(0, 212, 255, 0.1);
             border: 1px solid rgba(0, 212, 255, 0.3);
             border-radius: 20px;
+            transition: all 0.3s ease;
+        }
+
+        .conversation-indicator.listening {
+            background: rgba(16, 185, 129, 0.15);
+            border-color: rgba(16, 185, 129, 0.4);
+            box-shadow: 0 0 20px rgba(16, 185, 129, 0.3);
+        }
+
+        .conversation-indicator.processing {
+            background: rgba(0, 212, 255, 0.15);
+            border-color: rgba(0, 212, 255, 0.4);
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+        }
+
+        .conversation-indicator.speaking {
+            background: rgba(124, 58, 237, 0.15);
+            border-color: rgba(124, 58, 237, 0.4);
+            box-shadow: 0 0 20px rgba(124, 58, 237, 0.3);
         }
 
         .indicator-dot {
-            width: 12px;
-            height: 12px;
+            width: 16px;
+            height: 16px;
             border-radius: 50%;
             background: #00d4ff;
-            animation: pulse-dot 1.5s ease-in-out infinite;
+            position: relative;
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.6);
         }
 
+        /* LISTENING State - Large, prominent pulsing animation */
         .indicator-dot.listening {
             background: #10b981;
+            box-shadow: 0 0 30px rgba(16, 185, 129, 0.8);
+            animation: listening-pulse 1.2s ease-in-out infinite;
         }
 
+        .indicator-dot.listening::before {
+            content: '';
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: #10b981;
+            animation: listening-ripple 1.5s ease-out infinite;
+            opacity: 0.6;
+        }
+
+        .indicator-dot.listening::after {
+            content: '';
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: #10b981;
+            animation: listening-ripple 1.5s ease-out infinite 0.5s;
+            opacity: 0.4;
+        }
+
+        @keyframes listening-pulse {
+            0%, 100% { 
+                transform: scale(1);
+                box-shadow: 0 0 30px rgba(16, 185, 129, 0.8);
+            }
+            50% { 
+                transform: scale(1.3);
+                box-shadow: 0 0 40px rgba(16, 185, 129, 1);
+            }
+        }
+
+        @keyframes listening-ripple {
+            0% {
+                transform: scale(1);
+                opacity: 0.6;
+            }
+            100% {
+                transform: scale(2.5);
+                opacity: 0;
+            }
+        }
+
+        /* PROCESSING State - Spinning/loading animation */
+        .indicator-dot.processing {
+            background: #00d4ff;
+            box-shadow: 0 0 30px rgba(0, 212, 255, 0.8);
+            animation: processing-spin 1s linear infinite;
+        }
+
+        .indicator-dot.processing::before {
+            content: '';
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            border: 3px solid transparent;
+            border-top-color: #00d4ff;
+            border-right-color: #00d4ff;
+            animation: processing-ring 1.2s linear infinite;
+            top: -3px;
+            left: -3px;
+        }
+
+        .indicator-dot.processing::after {
+            content: '';
+            position: absolute;
+            width: 140%;
+            height: 140%;
+            border-radius: 50%;
+            border: 2px solid rgba(0, 212, 255, 0.3);
+            animation: processing-outer-ring 2s ease-in-out infinite;
+            top: -20%;
+            left: -20%;
+        }
+
+        @keyframes processing-spin {
+            0% { transform: rotate(0deg) scale(1); }
+            50% { transform: rotate(180deg) scale(1.2); }
+            100% { transform: rotate(360deg) scale(1); }
+        }
+
+        @keyframes processing-ring {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @keyframes processing-outer-ring {
+            0%, 100% { 
+                transform: scale(1);
+                opacity: 0.3;
+            }
+            50% { 
+                transform: scale(1.3);
+                opacity: 0.6;
+            }
+        }
+
+        /* SPEAKING State - Subtle pulse */
         .indicator-dot.speaking {
             background: #7c3aed;
+            box-shadow: 0 0 25px rgba(124, 58, 237, 0.7);
+            animation: speaking-pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes speaking-pulse {
+            0%, 100% { 
+                transform: scale(1);
+                opacity: 1;
+            }
+            50% { 
+                transform: scale(1.15);
+                opacity: 0.8;
+            }
         }
 
         .ready-countdown {
@@ -228,11 +364,6 @@
             color: #00d4ff;
             font-size: 0.9rem;
             font-style: italic;
-        }
-
-        @keyframes pulse-dot {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.5; transform: scale(1.2); }
         }
 
         /* Two-column layout */
@@ -249,6 +380,7 @@
         }
 
         .question-panel {
+            position: relative;
             background: rgba(255, 255, 255, 0.05);
             border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 16px;
@@ -258,6 +390,7 @@
             align-items: center;
             justify-content: center;
             flex: 1;
+            overflow: hidden;
         }
 
         .question-text {
@@ -265,6 +398,264 @@
             line-height: 1.6;
             text-align: center;
             color: #e0e0e0;
+            transition: all 0.3s ease;
+            position: relative;
+            z-index: 20;
+            max-width: 90%;
+        }
+
+        /* Hide question text when animation is active */
+        .question-panel.animating .question-text {
+            opacity: 0.3;
+            font-size: 1.2rem;
+        }
+
+        /* Large State Animation Container */
+        .state-animation-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+            z-index: 10;
+            opacity: 0;
+            transition: opacity 0.4s ease;
+        }
+
+        .state-animation-container.active {
+            opacity: 1;
+        }
+
+        .state-animation {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .state-animation.hidden {
+            display: none;
+        }
+
+        /* ============================================
+           LISTENING STATE - Responsive & Reactive
+           ============================================ */
+        .listening-animation {
+            /* Large audio-reactive visualization */
+        }
+
+        /* Audio Wave Visualization - Responsive bars */
+        .audio-wave-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            height: 200px;
+            width: 100%;
+            position: relative;
+        }
+
+        .audio-wave {
+            width: 12px;
+            background: linear-gradient(180deg, 
+                rgba(16, 185, 129, 0.3) 0%,
+                rgba(16, 185, 129, 0.8) 50%,
+                rgba(16, 185, 129, 0.3) 100%);
+            border-radius: 6px;
+            animation: audio-wave-pulse 1.2s ease-in-out infinite;
+            animation-delay: var(--delay);
+            box-shadow: 0 0 20px rgba(16, 185, 129, 0.5);
+            min-height: 40px;
+        }
+
+        @keyframes audio-wave-pulse {
+            0%, 100% {
+                height: 40px;
+                opacity: 0.6;
+                transform: scaleY(0.5);
+            }
+            50% {
+                height: 180px;
+                opacity: 1;
+                transform: scaleY(1);
+            }
+        }
+
+        /* Listening Pulse Rings - Expanding circles */
+        .listening-pulse-ring {
+            position: absolute;
+            width: 300px;
+            height: 300px;
+            border: 3px solid rgba(16, 185, 129, 0.6);
+            border-radius: 50%;
+            animation: listening-pulse-expand 2s ease-out infinite;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        @keyframes listening-pulse-expand {
+            0% {
+                transform: translate(-50%, -50%) scale(0.8);
+                opacity: 1;
+                border-width: 3px;
+            }
+            100% {
+                transform: translate(-50%, -50%) scale(2);
+                opacity: 0;
+                border-width: 1px;
+            }
+        }
+
+        /* ============================================
+           PROCESSING STATE - Thoughtful & Cognitive
+           ============================================ */
+        .processing-animation {
+            /* Neural network / thinking visualization */
+        }
+
+        /* Neural Network Visualization */
+        .neural-network {
+            position: relative;
+            width: 400px;
+            height: 400px;
+        }
+
+        .neural-node {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background: radial-gradient(circle, 
+                rgba(0, 212, 255, 1) 0%,
+                rgba(0, 212, 255, 0.6) 50%,
+                rgba(0, 212, 255, 0.2) 100%);
+            border-radius: 50%;
+            left: var(--x);
+            top: var(--y);
+            transform: translate(-50%, -50%);
+            animation: neural-pulse 2s ease-in-out infinite;
+            animation-delay: var(--delay);
+            box-shadow: 0 0 30px rgba(0, 212, 255, 0.8);
+        }
+
+        .neural-node::before {
+            content: '';
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: rgba(0, 212, 255, 0.4);
+            animation: neural-ripple 2s ease-out infinite;
+            animation-delay: var(--delay);
+        }
+
+        @keyframes neural-pulse {
+            0%, 100% {
+                transform: translate(-50%, -50%) scale(1);
+                opacity: 0.8;
+            }
+            50% {
+                transform: translate(-50%, -50%) scale(1.5);
+                opacity: 1;
+            }
+        }
+
+        @keyframes neural-ripple {
+            0% {
+                transform: scale(1);
+                opacity: 0.6;
+            }
+            100% {
+                transform: scale(3);
+                opacity: 0;
+            }
+        }
+
+        /* Processing Orb - Central thinking element */
+        .processing-orb {
+            position: absolute;
+            width: 120px;
+            height: 120px;
+            background: radial-gradient(circle at 30% 30%,
+                rgba(0, 212, 255, 1) 0%,
+                rgba(0, 212, 255, 0.6) 40%,
+                rgba(0, 212, 255, 0.2) 100%);
+            border-radius: 50%;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            animation: processing-orb-pulse 2s ease-in-out infinite;
+            box-shadow: 
+                0 0 60px rgba(0, 212, 255, 1),
+                0 0 120px rgba(0, 212, 255, 0.6),
+                inset 0 0 40px rgba(0, 212, 255, 0.4);
+        }
+
+        @keyframes processing-orb-pulse {
+            0%, 100% {
+                transform: translate(-50%, -50%) scale(1);
+                opacity: 0.9;
+            }
+            50% {
+                transform: translate(-50%, -50%) scale(1.2);
+                opacity: 1;
+            }
+        }
+
+        /* Processing Rings - Concentric thinking rings */
+        .processing-rings {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        .processing-ring {
+            position: absolute;
+            border: 2px solid rgba(0, 212, 255, 0.4);
+            border-radius: 50%;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        .processing-ring.ring-1 {
+            width: 200px;
+            height: 200px;
+            animation: processing-ring-rotate 4s linear infinite;
+            border-style: dashed;
+        }
+
+        .processing-ring.ring-2 {
+            width: 280px;
+            height: 280px;
+            animation: processing-ring-rotate 6s linear infinite reverse;
+            border-style: dotted;
+        }
+
+        .processing-ring.ring-3 {
+            width: 360px;
+            height: 360px;
+            animation: processing-ring-rotate 8s linear infinite;
+            border-style: solid;
+            opacity: 0.3;
+        }
+
+        @keyframes processing-ring-rotate {
+            0% {
+                transform: translate(-50%, -50%) rotate(0deg);
+            }
+            100% {
+                transform: translate(-50%, -50%) rotate(360deg);
+            }
         }
 
         .transcript-section {
@@ -382,6 +773,44 @@
             <div class="interview-layout">
                 <div class="question-section">
                     <div class="question-panel">
+                        <!-- Large State Animation Container -->
+                        <div class="state-animation-container" id="stateAnimationContainer">
+                            <div class="state-animation listening-animation" id="listeningAnimation">
+                                <div class="audio-wave-container">
+                                    <div class="audio-wave" style="--delay: 0s"></div>
+                                    <div class="audio-wave" style="--delay: 0.1s"></div>
+                                    <div class="audio-wave" style="--delay: 0.2s"></div>
+                                    <div class="audio-wave" style="--delay: 0.3s"></div>
+                                    <div class="audio-wave" style="--delay: 0.4s"></div>
+                                    <div class="audio-wave" style="--delay: 0.5s"></div>
+                                    <div class="audio-wave" style="--delay: 0.6s"></div>
+                                    <div class="audio-wave" style="--delay: 0.7s"></div>
+                                </div>
+                                <div class="listening-pulse-ring"></div>
+                                <div class="listening-pulse-ring" style="animation-delay: 0.5s"></div>
+                                <div class="listening-pulse-ring" style="animation-delay: 1s"></div>
+                            </div>
+                            
+                            <div class="state-animation processing-animation" id="processingAnimation">
+                                <div class="neural-network">
+                                    <div class="neural-node" style="--x: 20%; --y: 30%; --delay: 0s"></div>
+                                    <div class="neural-node" style="--x: 50%; --y: 20%; --delay: 0.2s"></div>
+                                    <div class="neural-node" style="--x: 80%; --y: 30%; --delay: 0.4s"></div>
+                                    <div class="neural-node" style="--x: 30%; --y: 50%; --delay: 0.1s"></div>
+                                    <div class="neural-node" style="--x: 70%; --y: 50%; --delay: 0.3s"></div>
+                                    <div class="neural-node" style="--x: 20%; --y: 70%; --delay: 0.5s"></div>
+                                    <div class="neural-node" style="--x: 50%; --y: 80%; --delay: 0.6s"></div>
+                                    <div class="neural-node" style="--x: 80%; --y: 70%; --delay: 0.7s"></div>
+                                </div>
+                                <div class="processing-orb"></div>
+                                <div class="processing-rings">
+                                    <div class="processing-ring ring-1"></div>
+                                    <div class="processing-ring ring-2"></div>
+                                    <div class="processing-ring ring-3"></div>
+                                </div>
+                            </div>
+                        </div>
+                        
                         <div class="question-text" id="questionText">Waiting for interview to begin...</div>
                     </div>
                 </div>

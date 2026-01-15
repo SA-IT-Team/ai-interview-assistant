@@ -28,9 +28,17 @@ const conversationStatus = document.getElementById("conversationStatus");
 const indicatorDot = document.getElementById("indicatorDot");
 const audioPlayer = document.getElementById("audioPlayer");
 
-// State
+// State - Typed state constants for type safety
+const ConversationState = {
+    READY: "ready",
+    LISTENING: "listening",
+    SPEAKING: "speaking",
+    PROCESSING: "processing"
+};
+
 let ws = null;
 let resumeContext = null;
+let conversationState = ConversationState.READY; // Explicit state tracking - single source of truth
 let audioContext, mediaStreamSource, analyserNode;
 let audioPlaybackContext = null;
 let capturing = false;
@@ -179,16 +187,121 @@ function showError(message) {
     uploadError.classList.remove("hidden");
 }
 
-function updateConversationState(state) {
-    indicatorDot.className = "indicator-dot " + state;
-    const states = {
-        ready: { text: "Ready", color: "#888" },
-        listening: { text: "Listening...", color: "#10b981" },
-        speaking: { text: "Speaking...", color: "#7c3aed" },
-        processing: { text: "Processing...", color: "#00d4ff" }
+// State validation helper
+function validateStateTransition(fromState, toState) {
+    // Block self-transitions (unless explicitly allowed)
+    if (fromState === toState) {
+        console.warn(`Invalid state transition: ${fromState} -> ${toState} (self-transition not allowed)`);
+        return false;
+    }
+    
+    const validTransitions = {
+        "ready": ["listening", "speaking", "processing"],
+        "listening": ["processing", "speaking"],
+        "speaking": ["listening", "ready"],
+        "processing": ["speaking", "ready"]  // Can only go to speaking or ready
     };
-    const stateInfo = states[state] || states.ready;
+    
+    const allowed = validTransitions[fromState] || [];
+    if (!allowed.includes(toState)) {
+        console.warn(`Invalid state transition: ${fromState} -> ${toState}`);
+        return false;
+    }
+    return true;
+}
+
+function updateConversationState(state) {
+    const previousState = conversationState || ConversationState.READY;
+    
+    // Validate state is a valid enum value
+    const validStates = Object.values(ConversationState);
+    if (!validStates.includes(state)) {
+        console.error(`Invalid state transition attempted: ${state}`);
+        return; // Don't update state - keep current state
+    }
+    
+    // Block self-transitions
+    if (previousState === state) {
+        console.warn(`Invalid state transition blocked: ${previousState} -> ${state} (self-transition)`);
+        return; // Don't update state
+    }
+    
+    // Validate transition is allowed
+    if (!validateStateTransition(previousState, state)) {
+        console.error(`Invalid state transition blocked: ${previousState} -> ${state}`);
+        // Don't fallback - keep current state
+        return;
+    }
+    
+    // Update explicit state variable (single source of truth)
+    conversationState = state;
+    
+    // CRITICAL: Synchronize questionText with state
+    // Clear "Your turn" message when leaving LISTENING state
+    if (previousState === ConversationState.LISTENING && state !== ConversationState.LISTENING) {
+        // Only clear if it's the "Your turn" message
+        if (questionText.textContent.includes("Your turn") || questionText.textContent.includes("Please speak")) {
+            questionText.textContent = ""; // Clear the message
+        }
+    }
+    
+    // Set appropriate message for PROCESSING state
+    if (state === ConversationState.PROCESSING) {
+        // Don't show "Your turn" during processing - show processing message instead
+        if (!questionText.textContent || questionText.textContent.includes("Your turn") || questionText.textContent.includes("Please speak")) {
+            questionText.textContent = "Processing your answer...";
+        }
+    }
+    
+    // Update large state animations
+    const stateAnimationContainer = document.getElementById("stateAnimationContainer");
+    const listeningAnimation = document.getElementById("listeningAnimation");
+    const processingAnimation = document.getElementById("processingAnimation");
+    const questionPanel = document.querySelector(".question-panel");
+    
+    if (stateAnimationContainer && listeningAnimation && processingAnimation && questionPanel) {
+        // Hide all animations first
+        listeningAnimation.classList.add("hidden");
+        processingAnimation.classList.add("hidden");
+        stateAnimationContainer.classList.remove("active");
+        questionPanel.classList.remove("animating");
+        
+        // Show appropriate animation based on state
+        if (state === ConversationState.LISTENING) {
+            listeningAnimation.classList.remove("hidden");
+            stateAnimationContainer.classList.add("active");
+            questionPanel.classList.add("animating");
+        } else if (state === ConversationState.PROCESSING) {
+            processingAnimation.classList.remove("hidden");
+            stateAnimationContainer.classList.add("active");
+            questionPanel.classList.add("animating");
+        }
+    }
+    
+    // Update UI
+    indicatorDot.className = "indicator-dot " + state;
+    
+    // Update conversation indicator container class for enhanced styling
+    const conversationIndicator = document.getElementById("conversationIndicator");
+    if (conversationIndicator) {
+        // Remove all state classes
+        conversationIndicator.classList.remove("listening", "processing", "speaking", "ready");
+        // Add current state class
+        if (state !== ConversationState.READY) {
+            conversationIndicator.classList.add(state);
+        }
+    }
+    
+    const states = {
+        [ConversationState.READY]: { text: "Ready", color: "#888" },
+        [ConversationState.LISTENING]: { text: "Listening...", color: "#10b981" },
+        [ConversationState.SPEAKING]: { text: "Speaking...", color: "#7c3aed" },
+        [ConversationState.PROCESSING]: { text: "Processing...", color: "#00d4ff" }
+    };
+    const stateInfo = states[state] || states[ConversationState.READY];
     conversationStatus.textContent = stateInfo.text;
+    
+    console.log(`State transition: ${previousState} -> ${conversationState}`);
 }
 
 function startTimer() {
@@ -233,39 +346,43 @@ async function startInterview() {
     pauseHistory = [];
     speechSegments = [];
     adaptiveSilenceThreshold = 1200;
+    
+    // Initialize state machine explicitly
+    conversationState = ConversationState.READY;
+    updateConversationState(ConversationState.READY);
 
     try {
         const role = "Software Engineer";
         const level = "Mid";
         const candidateName = resumeContext.name || "Candidate";
 
-        ws = new WebSocket(wsUrl);
-        ws.binaryType = "arraybuffer";
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = "arraybuffer";
 
-        ws.onopen = () => {
-            updateConversationState("ready");
+  ws.onopen = () => {
+            updateConversationState(ConversationState.READY);
             console.log("WebSocket connected");
-            ws.send(
-                JSON.stringify({
-                    type: "start",
-                    data: {
-                        role,
-                        level,
+    ws.send(
+      JSON.stringify({
+        type: "start",
+        data: {
+          role,
+          level,
                         candidate_name: candidateName,
-                        resume_context: resumeContext,
-                    },
-                })
-            );
-            setupMedia();
+          resume_context: resumeContext,
+        },
+      })
+    );
+    setupMedia();
             startTimer();
-        };
+  };
 
         let isReceivingAudio = false;
         let audioTimeoutId = null;
 
-        ws.onmessage = async (event) => {
-            if (typeof event.data === "string") {
-                const msg = JSON.parse(event.data);
+  ws.onmessage = async (event) => {
+    if (typeof event.data === "string") {
+      const msg = JSON.parse(event.data);
                 
                 // If we were receiving audio and now get a new message, audio stream is complete
                 if (isReceivingAudio && audioChunks.length > 0) {
@@ -303,12 +420,12 @@ async function startInterview() {
                     }, 5000);
                 }
                 
-                handleJson(msg);
-            } else {
+      handleJson(msg);
+    } else {
                 // Handle binary audio data
                 isReceivingAudio = true;
-                const chunk = new Uint8Array(event.data);
-                audioChunks.push(chunk);
+      const chunk = new Uint8Array(event.data);
+      audioChunks.push(chunk);
                 const totalSize = audioChunks.reduce((acc, c) => acc + c.length, 0);
                 console.log(`Received audio chunk: ${chunk.length} bytes, total chunks: ${audioChunks.length}, total size: ${totalSize} bytes`);
                 
@@ -344,7 +461,7 @@ async function startInterview() {
             }
             
             // Create blob and try both methods: HTML5 audio and Web Audio API
-            const blob = new Blob(audioChunks, { type: "audio/mpeg" });
+      const blob = new Blob(audioChunks, { type: "audio/mpeg" });
             const url = URL.createObjectURL(blob);
             
             // Display question text NOW, synchronized with audio playback start
@@ -364,7 +481,7 @@ async function startInterview() {
                 pendingQuestionText = null; // Clear after displaying
             }
             
-            updateConversationState("speaking");
+            updateConversationState(ConversationState.SPEAKING);
             isAudioPlaying = true; // Track that audio is playing
             
             // Helper function to handle audio completion
@@ -478,13 +595,13 @@ async function startInterview() {
             }
         }
 
-        ws.onclose = () => {
-            updateConversationState("ready");
+  ws.onclose = () => {
+            updateConversationState(ConversationState.READY);
             stopTimer();
-            stopAudioProcessing();
-        };
+    stopAudioProcessing();
+  };
 
-        ws.onerror = (err) => {
+  ws.onerror = (err) => {
             console.error("WebSocket error", err);
             showError("Connection failed. Please refresh and try again.");
         };
@@ -514,8 +631,9 @@ function startCountdownAndListening() {
         audioContext.resume().then(() => {
             console.log("AudioContext resumed, starting audio processing");
             isReadyToAnswer = true;
+            // CRITICAL: Set message BEFORE updating state to LISTENING
             questionText.textContent = "🎤 Your turn! Please speak your answer now...";
-            updateConversationState("listening");
+            updateConversationState(ConversationState.LISTENING);
             startAudioProcessing();
         }).catch((err) => {
             console.error("Failed to resume AudioContext:", err);
@@ -526,9 +644,9 @@ function startCountdownAndListening() {
     
     isReadyToAnswer = true; // Ready to accept answers immediately
     
-    // Show clear "Your Turn" message
+    // CRITICAL: Set message BEFORE updating state to LISTENING
     questionText.textContent = "🎤 Your turn! Please speak your answer now...";
-    updateConversationState("listening");
+    updateConversationState(ConversationState.LISTENING);
     
     startAudioProcessing();
 }
@@ -540,8 +658,15 @@ function handleJson(msg) {
         return;
     }
     
-    switch (msg.type) {
-        case "question_text":
+  switch (msg.type) {
+    case "question_text":
+            // Clear timeout if it exists (question arrived in time)
+            if (window.pendingQuestionTimeout) {
+                clearTimeout(window.pendingQuestionTimeout);
+                window.pendingQuestionTimeout = null;
+                console.log("✅ question_text received - cleared timeout");
+            }
+            
             // Stop any ongoing audio processing when new question arrives
             stopAudioProcessing();
             isReadyToAnswer = false; // Reset flag - wait for ready_to_listen
@@ -564,7 +689,7 @@ function handleJson(msg) {
             
             // Don't start listening yet - wait for ready_to_listen signal
             // Audio will be played when stream completes (handled in onmessage)
-            updateConversationState("speaking");
+            updateConversationState(ConversationState.SPEAKING);
             break;
         case "ready_to_listen":
             // Backend has finished sending audio and is ready for answer
@@ -601,8 +726,8 @@ function handleJson(msg) {
             // Audio has finished, start listening immediately
             // Note: isReadyToAnswer will be set to true in startCountdownAndListening()
             startCountdownAndListening();
-            break;
-        case "turn_result":
+      break;
+    case "turn_result":
             console.log("=== TURN RESULT RECEIVED ===");
             console.log("Transcript:", msg.transcript);
             console.log("Score:", msg.score);
@@ -619,33 +744,59 @@ function handleJson(msg) {
                 addTranscriptEntry("candidate", "[No transcript available]");
             }
             
+            // CRITICAL FIX: Stop audio processing but DON'T block question reception
             stopAudioProcessing(); // Stop listening when answer is processed
             isReadyToAnswer = false; // Reset flag
+            
             if (countdownInterval) {
                 clearInterval(countdownInterval);
                 countdownInterval = null;
             }
-            if (msg.end_interview) {
-                updateConversationState("processing");
+            
+      if (msg.end_interview) {
+                updateConversationState(ConversationState.PROCESSING);
+                // Interview ending - wait for summary/report
             } else {
-                updateConversationState("processing"); // Show processing while next question is generated
-            }
-            break;
-        case "done":
-            updateConversationState("ready");
+                // CRITICAL: Set state to "processing" but ensure we're ready to receive question_text
+                updateConversationState(ConversationState.PROCESSING);
+                
+                // Set a timeout to detect if question_text doesn't arrive
+                // This prevents the interview from getting stuck
+                if (window.pendingQuestionTimeout) {
+                    clearTimeout(window.pendingQuestionTimeout);
+                }
+                
+                window.pendingQuestionTimeout = setTimeout(() => {
+                    // Only warn if still in processing state (question didn't arrive)
+                    if (conversationState === ConversationState.PROCESSING) {
+                        console.warn("⚠️ WARNING: question_text not received within 10 seconds after turn_result");
+                        console.warn("⚠️ This indicates a backend issue - question generation may have failed");
+                        showError("Waiting for next question... If this persists, the interview may have encountered an error.");
+                        // DON'T try to transition to the same state - just log the error
+                        // The state will transition when question_text arrives or connection fails
+                    } else {
+                        console.warn("⚠️ State check skipped - conversationState is:", typeof conversationState, conversationState);
+                    }
+                }, 10000); // 10 second timeout
+                
+                console.log("Waiting for question_text (10s timeout set)");
+      }
+      break;
+    case "done":
+            updateConversationState(ConversationState.READY);
             stopTimer();
-            stopAudioProcessing();
+      stopAudioProcessing();
             isReadyToAnswer = false; // Reset flag
             if (countdownInterval) {
                 clearInterval(countdownInterval);
                 countdownInterval = null;
             }
             questionText.textContent = "Interview complete. Thank you for your time!";
-            break;
-        case "summary":
+      break;
+    case "summary":
             addTranscriptEntry("assistant", `Summary: ${msg.text}`);
-            break;
-        case "json_report":
+      break;
+    case "json_report":
             console.log("Evaluation Report:", msg.data);
             break;
         case "tts_error":
@@ -666,8 +817,8 @@ function handleJson(msg) {
             }
             addTranscriptEntry("assistant", `[Audio Error: ${msg.message}]`);
             // ready_to_listen will be sent after tts_error, so don't start here
-            break;
-        case "error":
+      break;
+    case "error":
             showError(msg.message);
             // Reset state on error
             stopAudioProcessing();
@@ -676,14 +827,14 @@ function handleJson(msg) {
                 clearInterval(countdownInterval);
                 countdownInterval = null;
             }
-            break;
-        default:
-            console.warn("Unknown message", msg);
-    }
+      break;
+    default:
+      console.warn("Unknown message", msg);
+  }
 }
 
 async function setupMedia() {
-    try {
+  try {
         console.log("Requesting microphone access...");
         const stream = await navigator.mediaDevices.getUserMedia({ 
             audio: {
@@ -698,7 +849,7 @@ async function setupMedia() {
         
         // Use higher sample rate for better transcription accuracy
         audioContext = new AudioContext({ sampleRate: 44100 });
-        mediaStreamSource = audioContext.createMediaStreamSource(stream);
+    mediaStreamSource = audioContext.createMediaStreamSource(stream);
         
         analyserNode = audioContext.createAnalyser();
         analyserNode.fftSize = 2048;
@@ -715,12 +866,12 @@ async function setupMedia() {
             bufferLength: bufferLength,
             sampleRate: audioContext.sampleRate
         });
-    } catch (e) {
+  } catch (e) {
         const errorMsg = "Microphone access denied: " + e.message;
         console.error("Media setup error:", e);
         showError(errorMsg);
         // Don't silently fail - show error to user
-        updateConversationState("ready");
+        updateConversationState(ConversationState.READY);
     }
 }
 
@@ -747,8 +898,8 @@ function processAudio() {
 }
 
 function handleAudioData(audioData) {
-    if (!capturing) return;
-    const now = performance.now();
+  if (!capturing) return;
+  const now = performance.now();
     
     // Improved voice detection: check for sustained voice, not just peaks
     let maxAmplitude = 0;
@@ -825,18 +976,18 @@ function handleAudioData(audioData) {
     }
     
     // Update lastVoiceTime only when voice is detected
-    if (voiced) {
-        lastVoiceTime = now;
-    }
+  if (voiced) {
+    lastVoiceTime = now;
+  }
     
     turnBuffer.push(new Float32Array(audioData));
 
-    const elapsed = now - (turnBufferStart || now);
+  const elapsed = now - (turnBufferStart || now);
     // Calculate silence: if no voice detected, silence = elapsed time
     const silenceElapsed = lastVoiceTime > 0 ? (now - lastVoiceTime) : elapsed;
 
-    if (!turnBufferStart) {
-        turnBufferStart = now;
+  if (!turnBufferStart) {
+    turnBufferStart = now;
         console.log("Started buffering audio at:", new Date().toISOString());
     }
 
@@ -863,28 +1014,28 @@ function handleAudioData(audioData) {
         elapsed > SAFETY_MAX_TIME_MS
     )) {
         console.log(`Finalizing turn: elapsed=${elapsed.toFixed(0)}ms, silence=${silenceElapsed.toFixed(0)}ms, voiced_duration=${voicedDuration.toFixed(0)}ms, adaptive_threshold=${adaptiveSilenceThreshold.toFixed(0)}ms, has_voice=${hasDetectedVoice}`);
-        finalizeTurn();
-    }
+    finalizeTurn();
+  }
 }
 
 function startAudioProcessing() {
     // Clear any previous audio data before starting
-    turnBuffer = [];
-    turnBufferStart = null;
-    lastVoiceTime = 0;
+  turnBuffer = [];
+  turnBufferStart = null;
+  lastVoiceTime = 0;
     
     // Check if media was set up successfully
     if (!analyserNode) {
         console.error("Cannot start audio processing: analyserNode is null. Media setup may have failed.");
         showError("Microphone not available. Please refresh and allow microphone access.");
-        updateConversationState("ready");
+        updateConversationState(ConversationState.READY);
         return;
     }
     
     if (!audioDataArray) {
         console.error("Cannot start audio processing: audioDataArray is null.");
         showError("Audio processing not initialized. Please refresh the page.");
-        updateConversationState("ready");
+        updateConversationState(ConversationState.READY);
         return;
     }
     
@@ -906,7 +1057,7 @@ function startAudioProcessing() {
 
 function startAudioProcessingInternal() {
     capturing = true;
-    updateConversationState("listening");
+    updateConversationState(ConversationState.LISTENING);
     
     console.log("Starting audio processing - ready to capture candidate response");
     console.log("AudioContext state:", audioContext ? audioContext.state : "null");
@@ -924,7 +1075,7 @@ function startAudioProcessingInternal() {
 }
 
 function stopAudioProcessing() {
-    capturing = false;
+  capturing = false;
     if (animationFrameId) {
         cancelAnimationFrame(animationFrameId);
         animationFrameId = null;
@@ -932,38 +1083,38 @@ function stopAudioProcessing() {
 }
 
 function float32ToWavBase64(buffers, sampleRate = 44100) {
-    const length = buffers.reduce((acc, b) => acc + b.length, 0);
-    const pcm16 = new Int16Array(length);
-    let offset = 0;
-    buffers.forEach((b) => {
-        for (let i = 0; i < b.length; i++) {
-            let s = Math.max(-1, Math.min(1, b[i]));
-            pcm16[offset++] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        }
-    });
-    
-    const byteRate = sampleRate * 2;
-    const blockAlign = 2;
-    const buffer = new ArrayBuffer(44 + pcm16.length * 2);
-    const view = new DataView(buffer);
-    function writeStr(offset, str) {
-        for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  const length = buffers.reduce((acc, b) => acc + b.length, 0);
+  const pcm16 = new Int16Array(length);
+  let offset = 0;
+  buffers.forEach((b) => {
+    for (let i = 0; i < b.length; i++) {
+      let s = Math.max(-1, Math.min(1, b[i]));
+      pcm16[offset++] = s < 0 ? s * 0x8000 : s * 0x7fff;
     }
-    writeStr(0, "RIFF");
-    view.setUint32(4, 36 + pcm16.length * 2, true);
-    writeStr(8, "WAVE");
-    writeStr(12, "fmt ");
+  });
+    
+  const byteRate = sampleRate * 2;
+  const blockAlign = 2;
+  const buffer = new ArrayBuffer(44 + pcm16.length * 2);
+  const view = new DataView(buffer);
+  function writeStr(offset, str) {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  }
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + pcm16.length * 2, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
     view.setUint32(16, 16, true);
     view.setUint16(20, 1, true);
     view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, byteRate, true);
-    view.setUint16(32, blockAlign, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
     view.setUint16(34, 16, true);
-    writeStr(36, "data");
-    view.setUint32(40, pcm16.length * 2, true);
-    const wavBytes = new Uint8Array(buffer);
-    wavBytes.set(new Uint8Array(pcm16.buffer), 44);
+  writeStr(36, "data");
+  view.setUint32(40, pcm16.length * 2, true);
+  const wavBytes = new Uint8Array(buffer);
+  wavBytes.set(new Uint8Array(pcm16.buffer), 44);
     
     // Convert to base64 in chunks to avoid stack overflow
     // Use a simple loop approach that's safe for large arrays
@@ -1027,7 +1178,13 @@ function finalizeTurn() {
     stopAudioProcessing();
     isReadyToAnswer = false; // Prevent sending again until next ready_to_listen
     isSendingAnswer = true; // Set flag to prevent duplicate sends
-    updateConversationState("processing");
+    
+    // CRITICAL: Clear "Your turn" message before transitioning to PROCESSING
+    if (questionText.textContent.includes("Your turn") || questionText.textContent.includes("Please speak")) {
+        questionText.textContent = ""; // Clear immediately
+    }
+    
+    updateConversationState(ConversationState.PROCESSING);
     
     console.log("=== SENDING ANSWER TO BACKEND ===");
     console.log(`Audio duration: ${durationSeconds.toFixed(2)} seconds`);
@@ -1049,12 +1206,12 @@ function finalizeTurn() {
     console.log(`Base64 audio preview: ${base64Audio.substring(0, 50)}...`);
     console.log("===================================");
     
-    ws.send(
-        JSON.stringify({
-            type: "answer",
-            data: { audio_base64: base64Audio, mime_type: "audio/wav" },
-        })
-    );
+  ws.send(
+    JSON.stringify({
+      type: "answer",
+      data: { audio_base64: base64Audio, mime_type: "audio/wav" },
+    })
+  );
     
     // Clear buffer after sending
     turnBuffer = [];
