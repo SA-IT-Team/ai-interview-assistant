@@ -15,8 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from .config import get_settings
 from .schemas import AnswerPayload, LlmResult, SessionState, StartPayload
-from .stt import transcribe_base64_audio
-from .llm import call_llm, generate_greeting, prepare_llm_context
+from .stt import transcribe_base64_audio, transcribe_with_early_reasoning
+from .llm import call_llm, generate_greeting, prepare_llm_context, interpret_consent, generate_speculative_questions, validate_question_relevance
 from .tts import stream_eleven, TTSException
 from .resume import extract_text_from_pdf, summarize_resume
 from .schemas import ResumeContext
@@ -307,6 +307,7 @@ async def interview(ws: WebSocket):
             resume_context=start_payload.resume_context,
             history=[],
             interview_started_at=datetime.now().isoformat(),
+            interview_start_time=time.time(),  # Track interview start time for duration limits
         )
         
         # Display resume summary
@@ -403,20 +404,10 @@ async def interview(ws: WebSocket):
             logger.info(f"Timestamp: {datetime.now().isoformat()}")
             logger.info(f"=========================")
             
-            # OPTIMIZATION: Start transcription and LLM context preparation in parallel
+            # PHASE 1-4: Low-latency architecture - incremental transcription with early reasoning
             turn_start_time = time.time()
             
-            # Start transcription task (this is the main bottleneck)
-            transcription_task = asyncio.create_task(
-                transcribe_base64_audio(
-                    payload.audio_base64, 
-                    payload.mime_type,
-                    current_question=current_question
-                )
-            )
-            
-            # OPTIMIZATION: Prepare LLM context in parallel while transcription is running
-            # This pre-computes resume text, history summary, and signal quality metrics
+            # Prepare LLM context in parallel (non-blocking)
             llm_prep_task = asyncio.create_task(
                 prepare_llm_context(
                     state=state,
@@ -427,27 +418,54 @@ async def interview(ws: WebSocket):
                     has_asked_behavioral=state.has_asked_behavioral,
                     question_count=state.question_count,
                     followup_count=state.followup_count,
-                    force_new_topic=state.followup_count >= 3,
+                    force_new_topic=state.followup_count >= 4,
                 )
             )
             
-            # Wait for transcription to complete (this is still the bottleneck)
-            transcript = await transcription_task
+            # PHASE 1: Incremental transcription with early reasoning
+            # This starts reasoning as soon as we have partial transcript
+            prepared_context = await llm_prep_task  # Wait for context prep (fast)
+            prep_time = time.time() - turn_start_time
+            logger.info(f"LLM context prepared in {prep_time:.2f}s")
             
-            # Stricter validation: reject empty or whitespace-only transcripts
-            if not transcript or not transcript.strip():
-                logger.warning(f"Received empty or invalid transcript, ignoring answer")
-                await ws.send_json({
-                    "type": "turn_result",
-                    "transcript": "[Could not transcribe audio - please try again]",
-                    "score": 0,
-                    "rationale": "Audio transcription failed or was too quiet. Please speak clearly and try again.",
-                    "red_flags": [],
-                    "end_interview": False,
-                })
-                # Send ready_to_listen to allow candidate to try again
-                await ws.send_json({"type": "ready_to_listen"})
-                continue
+            # SIMPLIFIED: Single transcription call - faster and more accurate
+            # Removed incremental approach and early reasoning that was adding latency
+            try:
+                transcript, _ = await transcribe_with_early_reasoning(
+                    payload.audio_base64,
+                    payload.mime_type,
+                    current_question,
+                    state,
+                    prepared_context,
+                    call_llm
+                )
+            except Exception as e:
+                logger.error(f"Transcription failed: {str(e)}", exc_info=True)
+                # Fallback to direct transcription
+                try:
+                    transcript = await transcribe_base64_audio(
+                        payload.audio_base64,
+                        payload.mime_type,
+                        current_question=current_question
+                    )
+                except Exception as fallback_error:
+                    logger.error(f"Fallback transcription also failed: {str(fallback_error)}")
+                    transcript = None
+            
+            # Stricter validation: handle empty or very short transcripts defensively
+            if not transcript or not transcript.strip() or len(transcript.strip()) < 3:
+                logger.warning(f"Received empty or very short transcript: '{transcript}' - treating as unclear answer")
+                # Don't reject completely - treat as low-quality answer and let LLM handle it
+                # But ensure we don't get stuck in a loop
+                if state.clarification_depth >= 2:
+                    logger.info("Max clarification depth reached for unclear answer - moving to new question")
+                    # Force a new question from resume to avoid clarification loop
+                    force_new_topic = True
+                    # Reset clarification tracking
+                    state.clarification_depth = 0
+                    state.last_clarification_topic = None
+                # Continue processing - let LLM generate appropriate response
+                # Don't send ready_to_listen here - let normal flow handle it
             
             # Log the actual transcript for debugging - this should always be the real Whisper result
             transcription_time = time.time() - turn_start_time
@@ -458,14 +476,19 @@ async def interview(ws: WebSocket):
             logger.info(f"Current question: '{current_question[:100] if current_question else 'None'}...'")
             logger.info(f"===========================")
 
-            # Check for consent cancellation (first answer only)
+            # Check for consent interpretation (first answer only) - AI-based, optimized for speed
             if len(state.history) == 0 and not state.consent_given:
-                # Log the actual transcript for debugging
                 logger.info(f"Consent answer received: '{transcript}'")
-                transcript_lower = transcript.lower()
-                cancel_keywords = ["no", "not now", "later", "cancel", "not ready", "wait"]
-                if any(keyword in transcript_lower for keyword in cancel_keywords):
-                    # Generate canceled evaluation
+                
+                # Use AI to intelligently interpret consent intent (optimized for speed)
+                consent_start_time = time.time()
+                consent_result = await interpret_consent(transcript, current_question)
+                consent_time = time.time() - consent_start_time
+                logger.info(f"Consent interpretation completed in {consent_time:.2f}s: {consent_result}")
+                
+                if consent_result == "denied":
+                    # Candidate declined - cancel interview
+                    logger.info("Candidate declined consent - canceling interview")
                     canceled_eval = {
                         "status": "canceled",
                         "resume_summary": state.resume_context.summary if state.resume_context else None,
@@ -483,7 +506,63 @@ async def interview(ws: WebSocket):
                     await ws.send_json({"type": "done", "message": "Interview canceled. Thank you."})
                     await ws.close()
                     return
-                else:
+                elif consent_result == "unclear":
+                    # Response was unclear - ask for clarification
+                    logger.info("Consent response unclear - asking for clarification")
+                    clarification = "I didn't quite catch that. Are you ready to begin the interview? Please say 'yes' to start or 'no' to cancel."
+                    current_question = clarification
+                    # Send question text immediately
+                    await ws.send_json({"type": "question_text", "text": current_question})
+                    
+                    # Stream TTS for clarification in background (non-blocking)
+                    async def stream_clarification_tts():
+                        try:
+                            logger.info(f"Starting TTS for clarification: {len(current_question)} characters")
+                            chunk_count = 0
+                            async for chunk in stream_eleven(current_question):
+                                await ws.send_bytes(chunk)
+                                chunk_count += 1
+                            logger.info(f"TTS streaming completed: {chunk_count} chunks sent")
+                            await ws.send_json({"type": "ready_to_listen"})
+                        except TTSException as e:
+                            logger.error(f"TTS failed for clarification: {str(e)}")
+                            await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
+                            await ws.send_json({"type": "ready_to_listen"})
+                        except Exception as e:
+                            logger.error(f"Unexpected error in clarification TTS streaming: {str(e)}", exc_info=True)
+                            await ws.send_json({"type": "tts_error", "message": f"Audio generation failed: {str(e)}"})
+                            await ws.send_json({"type": "ready_to_listen"})
+                    
+                    clarification_tts_task = asyncio.create_task(stream_clarification_tts())
+                    
+                    def clarification_tts_callback(task):
+                        try:
+                            if task.exception():
+                                logger.error(f"Clarification TTS task failed with exception: {task.exception()}", exc_info=True)
+                            else:
+                                logger.info(f"Clarification TTS task completed successfully")
+                        except Exception as e:
+                            logger.error(f"Error in clarification TTS task callback: {str(e)}", exc_info=True)
+                    
+                    clarification_tts_task.add_done_callback(clarification_tts_callback)
+                    
+                    # Add safety timeout for clarification TTS
+                    async def clarification_safety_timeout():
+                        await asyncio.sleep(30)
+                        if not clarification_tts_task.done():
+                            logger.warning("Clarification TTS task taking too long (>30s), sending ready_to_listen as safety measure")
+                            try:
+                                await ws.send_json({"type": "ready_to_listen"})
+                            except Exception as e:
+                                logger.error(f"Error sending safety ready_to_listen for clarification: {str(e)}")
+                    
+                    asyncio.create_task(clarification_safety_timeout())
+                    
+                    # Continue to next iteration to wait for clarification response
+                    continue
+                else:  # consent_result == "granted"
+                    # Candidate granted consent - proceed with interview
+                    logger.info("Consent granted - proceeding with interview")
                     state.consent_given = True
                     # Send the consent answer transcript to frontend for display
                     await ws.send_json({
@@ -501,7 +580,7 @@ async def interview(ws: WebSocket):
                     # Send question text immediately (frontend will display when audio starts)
                     await ws.send_json({"type": "question_text", "text": current_question})
                     
-                    # Stream TTS for intro question in background
+                    # Stream TTS for intro question in background (non-blocking)
                     async def stream_intro_tts():
                         try:
                             logger.info(f"Starting TTS for intro question: {len(current_question)} characters")
@@ -549,33 +628,45 @@ async def interview(ws: WebSocket):
                     # Continue to next iteration to wait for intro answer
                 continue
 
-            # OPTIMIZATION: LLM context preparation should be complete by now
-            # Wait for it if it's not done yet (should be very fast)
-            prepared_context = await llm_prep_task
-            prep_time = time.time() - turn_start_time
-            logger.info(f"LLM context prepared in {prep_time:.2f}s (parallel with transcription)")
-            
-            # Call LLM for scoring + next question (only after consent is given)
-            # LLM will intelligently handle all validation (response quality, resume inconsistencies, etc.)
-            force_new_topic = state.followup_count >= 3
+            # Call LLM with full transcript - with proper error handling
+            force_new_topic = state.followup_count >= 4
             llm_start_time = time.time()
-            logger.info(f"Calling LLM: question_count={state.question_count}, has_asked_intro={state.has_asked_intro}, has_asked_behavioral={state.has_asked_behavioral}, followup_count={state.followup_count}, force_new_topic={force_new_topic}, transcript='{transcript[:50]}...'")
-            llm_result: LlmResult = await call_llm(
-                role=state.role,
-                level=state.level,
-                history=state.history,
-                transcript=transcript,  # Pass transcript directly - LLM handles all validation
-                resume=state.resume_context,
-                has_asked_intro=state.has_asked_intro,
-                has_asked_behavioral=state.has_asked_behavioral,
-                question_count=state.question_count,
-                followup_count=state.followup_count,
-                force_new_topic=force_new_topic,
-                prepared_context=prepared_context,  # OPTIMIZATION: Use pre-prepared context
-                current_question=current_question,  # Pass current question for context-aware validation
-            )
-            llm_time = time.time() - llm_start_time
-            logger.info(f"LLM call completed in {llm_time:.2f}s")
+            
+            # Calculate elapsed time before calling LLM
+            elapsed_time = time.time() - (state.interview_start_time or time.time())
+            
+            logger.info(f"Calling LLM: question_count={state.question_count}, has_asked_intro={state.has_asked_intro}, has_asked_behavioral={state.has_asked_behavioral}, followup_count={state.followup_count}, force_new_topic={force_new_topic}, elapsed_time={elapsed_time:.1f}s ({elapsed_time/60:.1f}min), transcript='{transcript[:50] if transcript else 'None'}...'")
+            
+            try:
+                llm_result: LlmResult = await call_llm(
+                    role=state.role,
+                    level=state.level,
+                    history=state.history,
+                    transcript=transcript,
+                    resume=state.resume_context,
+                    has_asked_intro=state.has_asked_intro,
+                    has_asked_behavioral=state.has_asked_behavioral,
+                    question_count=state.question_count,
+                    followup_count=state.followup_count,
+                    force_new_topic=force_new_topic,
+                    prepared_context=prepared_context,
+                    current_question=current_question,
+                    elapsed_time=elapsed_time,
+                )
+                llm_time = time.time() - llm_start_time
+                logger.info(f"LLM call completed in {llm_time:.2f}s")
+            except Exception as e:
+                logger.error(f"LLM call failed: {str(e)}", exc_info=True)
+                # Fallback to safe default question to prevent interview from getting stuck
+                llm_result = LlmResult(
+                    next_question="Can you tell me more about that?",
+                    answer_score=3,
+                    rationale=f"Error occurred during processing: {str(e)}",
+                    red_flags=[],
+                    end_interview=False,
+                    question_type="technical"
+                )
+                logger.warning(f"Using fallback question due to LLM error: '{llm_result.next_question}'")
             
             # Log if LLM detected any issues
             if llm_result.answer_score <= 1:
@@ -586,15 +677,19 @@ async def interview(ws: WebSocket):
             
             logger.info(f"LLM response: answer_score={llm_result.answer_score}, question_type={llm_result.question_type}, end_interview={llm_result.end_interview}, red_flags={llm_result.red_flags}")
 
-            # Track question types and follow-ups
+            # Track question types and follow-ups with clarification depth management
             if llm_result.question_type == "intro":
                 state.has_asked_intro = True
                 state.current_topic = None  # Reset topic tracking for new question type
                 state.followup_count = 0
+                state.clarification_depth = 0  # Reset clarification depth
+                state.last_clarification_topic = None
             elif llm_result.question_type == "behavioral":
                 state.has_asked_behavioral = True
                 state.current_topic = None  # Reset topic tracking for new question type
                 state.followup_count = 0
+                state.clarification_depth = 0
+                state.last_clarification_topic = None
             elif llm_result.question_type == "followup":
                 # Check if we're following up on the same topic
                 if state.current_topic:
@@ -605,17 +700,96 @@ async def interview(ws: WebSocket):
                     state.current_topic = current_question[:50]  # Use first 50 chars as topic identifier
                     state.followup_count = 1
                     logger.info(f"Starting follow-up sequence on topic: {state.current_topic}")
+                
+                # Track clarification depth for unclear/low-quality answers
+                # Use a more robust topic identifier that captures resume mismatch patterns
+                if llm_result.answer_score <= 2 or (transcript and len(transcript.strip()) < 10):
+                    # Create a stable topic identifier for resume mismatches
+                    # Use the question type + first few words to identify the topic
+                    topic_key = f"{llm_result.question_type}:{current_question[:30]}"
+                    
+                    if state.last_clarification_topic == topic_key:
+                        state.clarification_depth += 1
+                        logger.info(f"Clarification depth increased to {state.clarification_depth} for topic: {topic_key[:50]}...")
+                    else:
+                        state.clarification_depth = 1
+                        state.last_clarification_topic = topic_key
+                        logger.info(f"Starting clarification tracking for topic: {topic_key[:50]}...")
+                    
+                    # MAX CLARIFICATION DEPTH: After 2 clarifications, move on
+                    if state.clarification_depth >= 2:
+                        logger.warning(f"Reached max clarification depth ({state.clarification_depth}) for topic: {topic_key[:50]}...")
+                        logger.info("Moving to new question from resume to avoid clarification loop")
+                        # Force new topic
+                        state.current_topic = None
+                        state.clarification_depth = 0
+                        state.last_clarification_topic = None
+                        force_new_topic = True
+                        # Reset followup_count to prevent double-triggering
+                        state.followup_count = 0
+                else:
+                    # Good answer - reset clarification depth
+                    state.clarification_depth = 0
+                    state.last_clarification_topic = None
             else:
                 # New question type (technical, etc.) - reset follow-up tracking
                 state.current_topic = None
                 state.followup_count = 0
+                state.clarification_depth = 0
+                state.last_clarification_topic = None
 
-            # Check if we've exceeded follow-up limit (3 consecutive follow-ups)
-            if state.followup_count >= 3:
+            # Check if we've exceeded follow-up limit (4 consecutive follow-ups)
+            if state.followup_count >= 4:
                 logger.info(f"Reached follow-up limit ({state.followup_count}) on topic. Forcing new question from resume.")
                 # Reset tracking - will force new topic in next LLM call
                 state.current_topic = None
                 state.followup_count = 0
+                state.clarification_depth = 0
+                state.last_clarification_topic = None
+
+            # Extract and track topics from the question/answer for coverage tracking
+            if state.resume_context:
+                # Initialize covered_dimensions if not already initialized
+                if not state.covered_dimensions:
+                    state.covered_dimensions = {
+                        "skills": False,
+                        "projects": False,
+                        "impact": False,
+                        "problem_solving": False,
+                        "communication": False
+                    }
+                
+                # Extract topics mentioned in the question or answer
+                question_lower = llm_result.next_question.lower()
+                transcript_lower = transcript.lower() if transcript else ""
+                
+                # Check which resume topics were discussed
+                all_resume_topics = (
+                    state.resume_context.skills +
+                    state.resume_context.projects +
+                    state.resume_context.roles +
+                    state.resume_context.tools
+                )
+                
+                for topic in all_resume_topics:
+                    if topic and (topic.lower() in question_lower or topic.lower() in transcript_lower):
+                        if topic not in state.covered_topics:
+                            state.covered_topics.append(topic)
+                            logger.info(f"New topic covered: {topic}")
+                
+                # Track dimension coverage based on question type
+                if llm_result.question_type == "technical":
+                    state.covered_dimensions["skills"] = True
+                elif llm_result.question_type == "behavioral":
+                    state.covered_dimensions["problem_solving"] = True
+                # Communication is tracked implicitly through all answers
+                state.covered_dimensions["communication"] = True
+                
+                # Check if projects/impact were discussed
+                if any(proj.lower() in question_lower or proj.lower() in transcript_lower 
+                       for proj in state.resume_context.projects if proj):
+                    state.covered_dimensions["projects"] = True
+                    state.covered_dimensions["impact"] = True
 
             # Very simple struggle heuristic based on low answer scores.
             if llm_result.answer_score <= 2:
@@ -657,19 +831,38 @@ async def interview(ws: WebSocket):
                 has_strong_signals = False
                 has_weak_signals = False
             
-            # Dynamic ending conditions:
-            # 1. LLM decides to end (and we have at least 1 real question)
-            # 2. Strong signals collected (high scores, good coverage) after minimum questions
-            # 3. Weak signals but enough questions asked (candidate struggling, move on)
-            # 4. Maximum safety limit (12 questions) to prevent infinite loops
+            # Dynamic ending conditions - PURELY TIME-BASED (15-20 minutes)
+            # Remove all question count limits - let time and quality determine ending
+            MAX_INTERVIEW_DURATION = 20 * 60  # 20 minutes in seconds
+            MIN_INTERVIEW_DURATION = 15 * 60  # 15 minutes in seconds
+            
+            elapsed_time = time.time() - (state.interview_start_time or time.time())
+            
+            # CRITICAL: Ignore LLM's end_interview decision if we haven't reached minimum duration
+            # The LLM may want to end early, but we enforce the 15-minute minimum
+            llm_wants_to_end = llm_result.end_interview and state.question_count >= 1
+            can_end_based_on_llm = llm_wants_to_end and elapsed_time >= MIN_INTERVIEW_DURATION
+            
+            # Time-based ending conditions (no question count limits):
             should_end = (
-                (llm_result.end_interview and state.question_count >= 1) or
-                (has_strong_signals and state.has_asked_intro and (state.has_asked_behavioral or state.question_count >= 5)) or
-                (has_weak_signals and state.question_count >= 6) or
-                state.question_count >= 12  # Safety maximum (increased from 8)
+                # 1. LLM wants to end AND minimum duration reached AND we have at least 1 question
+                can_end_based_on_llm or
+                # 2. Strong signals collected AND minimum duration reached (regardless of question count)
+                (has_strong_signals and state.has_asked_intro and state.has_asked_behavioral and elapsed_time >= MIN_INTERVIEW_DURATION) or
+                # 3. Weak signals but minimum duration reached (candidate struggling, move on)
+                (has_weak_signals and elapsed_time >= MIN_INTERVIEW_DURATION) or
+                # 4. Hard time limit reached (20 minutes) - must end
+                elapsed_time >= MAX_INTERVIEW_DURATION
             )
             
-            logger.info(f"Interview end check: should_end={should_end}, question_count={state.question_count}, end_interview={llm_result.end_interview}, has_asked_intro={state.has_asked_intro}, has_asked_behavioral={state.has_asked_behavioral}, avg_score={avg_score:.1f}, has_strong_signals={has_strong_signals}")
+            # Log detailed end check information
+            logger.info(f"Interview end check: should_end={should_end}, question_count={state.question_count}, "
+                        f"end_interview={llm_result.end_interview}, llm_wants_to_end={llm_wants_to_end}, "
+                        f"can_end_based_on_llm={can_end_based_on_llm}, has_asked_intro={state.has_asked_intro}, "
+                        f"has_asked_behavioral={state.has_asked_behavioral}, avg_score={avg_score:.1f}, "
+                        f"has_strong_signals={has_strong_signals}, has_weak_signals={has_weak_signals}, "
+                        f"elapsed_time={elapsed_time:.1f}s ({elapsed_time/60:.1f}min), "
+                        f"MIN_DURATION={MIN_INTERVIEW_DURATION/60:.1f}min, MAX_DURATION={MAX_INTERVIEW_DURATION/60:.1f}min")
             
             if should_end:
                 # Generate final evaluation if not provided by LLM
@@ -695,41 +888,113 @@ async def interview(ws: WebSocket):
                 await ws.close()
                 return
 
-            current_question = llm_result.next_question
-            
-            # Prevent question repetition
-            if state.history:
-                previous_questions = [turn["q"].lower().strip() for turn in state.history]
-                current_question_lower = current_question.lower().strip()
+            # CRITICAL: Wrap question generation in try/except to prevent silent failures
+            try:
+                # Validate next_question exists and is not empty
+                if not llm_result or not llm_result.next_question or not llm_result.next_question.strip():
+                    logger.warning("LLM returned empty or invalid question - using fallback")
+                    current_question = "Can you tell me more about your experience?"
+                else:
+                    current_question = llm_result.next_question
                 
-                # Check for exact matches or very similar questions (80% similarity threshold)
-                is_repeat = False
-                for prev_q in previous_questions:
-                    if current_question_lower == prev_q:
-                        is_repeat = True
-                        break
-                    # Check for high similarity (simple word overlap check)
-                    current_words = set(current_question_lower.split())
-                    prev_words = set(prev_q.split())
-                    if len(current_words) > 0 and len(prev_words) > 0:
-                        overlap = len(current_words & prev_words) / max(len(current_words), len(prev_words))
-                        if overlap > 0.8:  # 80% word overlap indicates repetition
+                # Additional validation: ensure question is meaningful (at least 10 characters)
+                if len(current_question.strip()) < 10:
+                    logger.warning(f"Generated question too short: '{current_question}' - using fallback")
+                    current_question = "Can you tell me more about your experience with this technology?"
+                
+                # Prevent question repetition
+                if state.history:
+                    previous_questions = [turn["q"].lower().strip() for turn in state.history]
+                    current_question_lower = current_question.lower().strip()
+                    
+                    # Check for exact matches or very similar questions (80% similarity threshold)
+                    is_repeat = False
+                    for prev_q in previous_questions:
+                        if current_question_lower == prev_q:
                             is_repeat = True
                             break
+                        # Check for high similarity (simple word overlap check)
+                        current_words = set(current_question_lower.split())
+                        prev_words = set(prev_q.split())
+                        if len(current_words) > 0 and len(prev_words) > 0:
+                            overlap = len(current_words & prev_words) / max(len(current_words), len(prev_words))
+                            if overlap > 0.8:  # 80% word overlap indicates repetition
+                                is_repeat = True
+                                break
+                    
+                    if is_repeat:
+                        logger.warning(f"LLM attempted to repeat question: '{current_question}'. Generating alternative follow-up.")
+                        # Generate a fallback follow-up based on the latest answer
+                        latest_answer = state.history[-1]["a"] if state.history else transcript
+                        # Extract key phrases and create a specific follow-up
+                        answer_words = latest_answer.split()[:20]  # First 20 words
+                        key_phrase = " ".join(answer_words[-5:]) if len(answer_words) >= 5 else latest_answer[:50]
+                        current_question = f"Can you tell me more about {key_phrase}? Specifically, what challenges did you face and how did you overcome them?"
+                        logger.info(f"Generated alternative follow-up: '{current_question}'")
                 
-                if is_repeat:
-                    logger.warning(f"LLM attempted to repeat question: '{current_question}'. Generating alternative follow-up.")
-                    # Generate a fallback follow-up based on the latest answer
-                    latest_answer = state.history[-1]["a"] if state.history else transcript
-                    # Extract key phrases and create a specific follow-up
-                    answer_words = latest_answer.split()[:20]  # First 20 words
-                    key_phrase = " ".join(answer_words[-5:]) if len(answer_words) >= 5 else latest_answer[:50]
-                    current_question = f"Can you tell me more about {key_phrase}? Specifically, what challenges did you face and how did you overcome them?"
-                    logger.info(f"Generated alternative follow-up: '{current_question}'")
+            except Exception as question_error:
+                logger.error(f"CRITICAL ERROR in question generation: {str(question_error)}", exc_info=True)
+                # Always set a fallback question - never skip
+                current_question = "Can you tell me more about your experience?"
+                logger.warning(f"Using fallback question due to error: '{current_question}'")
+                
+                # Try to send error notification (non-blocking)
+                try:
+                    await ws.send_json({
+                        "type": "error", 
+                        "message": "Error generating next question. Using fallback question."
+                    })
+                except Exception:
+                    pass  # Ignore error notification failures
+                
+                # Continue to question sending - don't skip it
+                # (Remove the continue statement that skips question sending)
             
             # Send question text IMMEDIATELY (frontend will display when audio starts)
             # This reduces perceived latency - user sees question while TTS generates
-            await ws.send_json({"type": "question_text", "text": current_question})
+            logger.info(f"=== SENDING NEXT QUESTION ===")
+            logger.info(f"Question: '{current_question[:100]}{'...' if len(current_question) > 100 else ''}'")
+            
+            # CRITICAL: Ensure question_text is sent with retry logic
+            question_sent = False
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    await ws.send_json({"type": "question_text", "text": current_question})
+                    logger.info("question_text sent successfully")
+                    question_sent = True
+                    break
+                except Exception as e:
+                    logger.error(f"Attempt {attempt + 1}/{max_retries} to send question_text failed: {str(e)}", exc_info=True)
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.1)  # Brief delay before retry
+                    else:
+                        # Last attempt failed - but we MUST send a question
+                        logger.error(f"CRITICAL: Failed to send question_text after {max_retries} attempts")
+                        # Try one more time with a simple fallback question
+                        try:
+                            fallback_question = "Can you tell me more about your experience?"
+                            await ws.send_json({"type": "question_text", "text": fallback_question})
+                            logger.warning(f"Sent fallback question after retry failures: '{fallback_question}'")
+                            question_sent = True
+                            current_question = fallback_question
+                        except Exception as final_error:
+                            logger.error(f"CRITICAL: Even fallback question send failed: {str(final_error)}", exc_info=True)
+                            # Last resort: send error and close connection
+                            try:
+                                await ws.send_json({
+                                    "type": "error", 
+                                    "message": "Unable to send next question. Please refresh and try again."
+                                })
+                            except:
+                                pass
+                            # Don't continue - this is a critical failure
+                            return  # Exit the interview loop
+            
+            # Only proceed with TTS if question_text was sent successfully
+            if not question_sent:
+                logger.error("Skipping TTS - question_text was not sent successfully")
+                continue
             
             # Stream TTS audio in background task - runs in parallel
             # Text already sent, so user sees it while audio generates
@@ -760,10 +1025,25 @@ async def interview(ws: WebSocket):
                 try:
                     if task.exception():
                         logger.error(f"Question TTS task failed with exception: {task.exception()}", exc_info=True)
+                        # Ensure ready_to_listen is sent even if TTS task fails
+                        # Use asyncio to send it from the callback context
+                        async def send_ready_on_error():
+                            try:
+                                await ws.send_json({"type": "ready_to_listen"})
+                            except Exception as send_error:
+                                logger.error(f"Failed to send ready_to_listen after TTS error: {str(send_error)}")
+                        asyncio.create_task(send_ready_on_error())
                     else:
                         logger.info(f"Question TTS task completed successfully")
                 except Exception as e:
                     logger.error(f"Error in TTS task callback: {str(e)}", exc_info=True)
+                    # Safety: try to send ready_to_listen even if callback itself fails
+                    async def send_ready_safety():
+                        try:
+                            await ws.send_json({"type": "ready_to_listen"})
+                        except Exception:
+                            pass  # Ignore errors in safety net
+                    asyncio.create_task(send_ready_safety())
             
             question_tts_task.add_done_callback(tts_task_callback)
             

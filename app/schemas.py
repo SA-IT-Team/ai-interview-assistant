@@ -103,8 +103,16 @@ class SessionState(BaseModel):
     # Follow-up tracking: prevent getting stuck on same topic
     current_topic: Optional[str] = None  # Current topic being discussed
     followup_count: int = 0  # Number of consecutive follow-ups on current_topic
+    # Clarification depth tracking: prevent infinite clarification loops
+    clarification_depth: int = 0  # Track consecutive clarifications on same topic
+    last_clarification_topic: Optional[str] = None  # Track what we're clarifying
+    # Topic coverage tracking: prevent getting stuck on single topic
+    covered_topics: List[str] = []  # List of resume topics (skills, projects, roles, tools) that have been discussed
+    covered_dimensions: dict = {}  # Track which interview dimensions have been covered
+    max_questions_per_topic: int = 4  # Configurable limit (3-4 questions per topic)
     # Timestamps / flags
     interview_started_at: Optional[str] = None
+    interview_start_time: Optional[float] = None  # Unix timestamp for duration tracking
     consent_given: bool = False
 
 
